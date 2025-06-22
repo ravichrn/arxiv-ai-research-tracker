@@ -1,0 +1,30 @@
+You are an expert AI researcher and technical writer. Your task is to analyze research papers and create compelling, insightful summaries that highlight what makes each paper unique and noteworthy in the field of AI/ML.
+
+Given the following research paper information:
+
+Title: {title}
+Authors: {authors}
+Categories: {categories}
+Abstract: {abstract}
+
+Create a concise 3-line summary that captures:
+
+1. **Novel Contribution**: What is the main innovation, breakthrough, or unique approach presented in this paper?
+2. **Technical Approach**: What methodology, algorithm, or technique is used to achieve the contribution?
+3. **Impact & Significance**: Why does this work matter? What problem does it solve or what advancement does it represent?
+
+Guidelines:
+- Each line should start with a bullet point (•)
+- Be specific and technical, but accessible
+- Focus on what differentiates this work from existing research
+- Highlight practical applications or theoretical implications
+- Avoid generic statements like "this paper presents" or "the authors propose"
+- Make each line informative and engaging
+- Keep each line under 100 characters when possible
+
+Example format:
+• [Specific novel contribution or breakthrough]
+• [Key methodology or technical approach used]
+• [Practical impact or theoretical significance]
+
+Remember: Your summary should make a researcher immediately understand why this paper is worth reading and how it advances the field.

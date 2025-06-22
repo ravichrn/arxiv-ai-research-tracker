@@ -1,0 +1,19 @@
+# Dependencies
+
+langchain
+langchain-openai
+langchain-community
+langchain-core
+openai
+chromadb
+arxiv
+python-dotenv
+numpy
+pandas
+requests
+pytest
+black
+flake8
+tqdm
+pydantic
+typing-extensions
