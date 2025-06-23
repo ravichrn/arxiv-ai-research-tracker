@@ -44,7 +44,7 @@ def fetch_and_summarize_papers(query="artificial intelligence", max_results=10):
             page_content=result.summary,
             metadata={
                 "title": result.title,
-                "authors": [a.name for a in result.authors],
+                "authors": ", ".join([a.name for a in result.authors]),
                 "url": result.entry_id,
                 "summary": summary
             }
@@ -58,7 +58,7 @@ def fetch_and_summarize_papers(query="artificial intelligence", max_results=10):
 # Format output for a document
 def format_metadata(doc):
     meta = doc.metadata
-    return f"Title: {meta.get('title')}\nAuthors: {', '.join(meta.get('authors', []))}\nSummary: {meta.get('summary')}\nURL: {meta.get('url')}\n"
+    return f"Title: {meta.get('title')}\nAuthors: {meta.get('authors', [])}\nSummary: {meta.get('summary')}\nURL: {meta.get('url')}\n"
 
 # Retrieve QA chain
 def get_qa_chain(store):
