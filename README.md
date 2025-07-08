@@ -20,7 +20,7 @@ Additional enhancements in progress.
 ## 📦 Setup
 
 ```bash
-git clone https://github.com/yourusername/ai-paper-explorer.git
+git clone https://github.com/ravichrn/arxiv-ai-research-tracker.git
 cd ai-paper-explorer
 python -m venv venv
 source venv/bin/activate
@@ -41,14 +41,9 @@ OPENAI_API_KEY=your_openai_api_key_here
 python main.py
 ```
 
-Then interact with the agent:
-- Ask: "What’s new in LLMs?"
-- Command: "Add XYZ paper to saved"
-- Query: "Show me saved papers about reinforcement learning"
-
 ---
 
-## Gett OpenAI API Key
+## Get OpenAI API Key
 
 1. Visit [OpenAI Platform](https://platform.openai.com/api-keys)
 2. Create an account or sign in
@@ -60,6 +55,7 @@ Then interact with the agent:
 ## 🚀 Future Enhancements
 
 - [ ] Web interface with Streamlit/Gradio
-- [ ] Export functionality (PDF, Word, LaTeX)
+- [ ] Routing for different sub-categories
 - [ ] Auto-tag papers ("LLM", "Vision", "RL")
-- [ ] Semantic clustering for trends
+- [ ] Run evaluations
+- [ ] Compare and critique two or more related papers
