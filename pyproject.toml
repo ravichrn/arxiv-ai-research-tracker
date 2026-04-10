@@ -1,0 +1,48 @@
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+include = ["agents*", "databases*", "ingestion*", "guardrails*", "evaluation*"]
+
+[project]
+name = "ai-paper-explorer"
+version = "0.2.0"
+description = "A research assistant that fetches, summarizes, and curates AI papers from arXiv"
+requires-python = ">=3.10"
+dependencies = [
+    # LangChain / LangGraph core
+    "langchain",
+    "langchain-core",
+    "langchain-community",
+    "langgraph",
+    # LLM providers
+    "langchain-openai",       # OpenAI (agent + fallback summarizer)
+    "langchain-anthropic",    # Claude (optional agent LLM)
+    "langchain-ollama",       # Ollama/Llama (local summarizer)
+    "diskcache",              # lightweight disk-backed embedding cache
+    # Infra
+    "openai",
+    "lancedb",
+    "arxiv",
+    "python-dotenv",
+    # Tracing — LangSmith (env vars only, no code needed)
+    "langsmith",
+    # Utilities
+    "numpy",
+    "pandas",
+    "requests",
+    "tqdm",
+    "pydantic",
+    "typing-extensions",
+]
+
+[project.scripts]
+ai-paper-explorer = "main:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "black",
+    "flake8",
+    "deepeval",
+]
