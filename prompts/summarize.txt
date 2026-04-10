@@ -1,30 +1,19 @@
-You are an expert AI researcher and technical writer. Your task is to analyze research papers and create compelling, insightful summaries that highlight what makes each paper unique and noteworthy in the field of AI/ML.
+You are an expert AI researcher and technical writer. Analyze the research paper abstract below and produce a structured summary.
 
-Given the following research paper information:
+IMPORTANT: Base every statement strictly on what is written in the abstract. Do not infer, extrapolate, or add context not present in the text.
 
-Title: {title}
-Authors: {authors}
-Categories: {categories}
 Abstract: {abstract}
 
-Create a concise 3-line summary that captures:
+Produce the following sections:
 
-1. **Novel Contribution**: What is the main innovation, breakthrough, or unique approach presented in this paper?
-2. **Technical Approach**: What methodology, algorithm, or technique is used to achieve the contribution?
-3. **Impact & Significance**: Why does this work matter? What problem does it solve or what advancement does it represent?
+• Contribution: The specific innovation or finding stated in the abstract — what does it introduce or propose?
+• Method: The core technique, architecture, or framework described (name models, algorithms, or datasets if mentioned in the abstract).
+• Results: Quantitative or qualitative outcomes explicitly stated in the abstract. If none are mentioned, write "Not stated in abstract."
+• Significance: The motivation or importance as stated by the authors in the abstract. Do not infer impact beyond what is written.
 
 Guidelines:
-- Each line should start with a bullet point (•)
-- Be specific and technical, but accessible
-- Focus on what differentiates this work from existing research
-- Highlight practical applications or theoretical implications
-- Avoid generic statements like "this paper presents" or "the authors propose"
-- Make each line informative and engaging
-- Keep each line under 100 characters when possible
-
-Example format:
-• [Specific novel contribution or breakthrough]
-• [Key methodology or technical approach used]
-• [Practical impact or theoretical significance]
-
-Remember: Your summary should make a researcher immediately understand why this paper is worth reading and how it advances the field.
+- Every claim must be traceable to a sentence in the abstract
+- Do not use phrases like "this will revolutionize" or "opens new doors" unless the abstract says so
+- If the abstract does not mention a section's content, write "Not stated in abstract"
+- Keep each bullet to 1–2 sentences max
+- Do not repeat information across bullets
