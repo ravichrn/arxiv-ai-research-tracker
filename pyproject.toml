@@ -8,12 +8,14 @@ include = ["agents*", "databases*", "ingestion*", "guardrails*", "evaluation*"]
 name = "ai-paper-explorer"
 version = "0.2.0"
 description = "A research assistant that fetches, summarizes, and curates AI papers from arXiv"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     # LangChain / LangGraph core
     "langchain",
     "langchain-core",
     "langchain-community",
+    "langchain-experimental",
+    "langchain-text-splitters",
     "langgraph",
     # LLM providers
     "langchain-openai",       # OpenAI (agent + fallback summarizer)
@@ -31,6 +33,7 @@ dependencies = [
     "numpy",
     "pandas",
     "requests",
+    "tenacity",
     "tqdm",
     "pydantic",
     "typing-extensions",
@@ -43,6 +46,41 @@ ai-paper-explorer = "main:main"
 dev = [
     "pytest",
     "black",
-    "flake8",
+    "ruff",
+    "pre-commit",
     "deepeval",
 ]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined names, etc.)
+    "I",   # isort (import ordering)
+    "B",   # flake8-bugbear (likely bugs and design issues)
+    "UP",  # pyupgrade (modernise syntax for target Python version)
+    "S",   # flake8-bandit (basic security checks)
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "S101",  # allow assert statements (used in stores.py type guards)
+    "B008",  # allow function calls in default arguments (LangChain patterns)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"evaluation/*" = ["S"]        # security rules less relevant in test/eval code
+"evaluation/datasets.py" = ["E501"]  # paper abstracts are long strings, can't wrap them
+# stores.py intentionally imports after load_dotenv() and set_llm_cache() calls —
+# the import order is load-order-sensitive, not alphabetical.
+"databases/stores.py" = ["E402", "F821"]  # F821: diskcache forward ref already type-ignored
+
+[tool.ruff.lint.isort]
+known-first-party = ["agents", "databases", "ingestion", "guardrails", "evaluation"]
+
+[tool.black]
+line-length = 100
+target-version = ["py313"]

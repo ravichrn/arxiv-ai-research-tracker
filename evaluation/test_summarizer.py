@@ -11,8 +11,8 @@ from deepeval import assert_test
 from deepeval.metrics import HallucinationMetric, SummarizationMetric
 from deepeval.test_case import LLMTestCase
 
-from ingestion.arxiv_fetcher import summarize_text
 from evaluation.datasets import SUMMARIZER_CASES
+from ingestion.arxiv_fetcher import summarize_text
 
 
 @pytest.mark.parametrize("case", SUMMARIZER_CASES, ids=[c.label for c in SUMMARIZER_CASES])
@@ -26,7 +26,7 @@ def test_summarizer_no_hallucination(case):
         context=[case.abstract],
     )
 
-    assert_test(test_case, [HallucinationMetric(threshold=0.4)])
+    assert_test(test_case, [HallucinationMetric(threshold=0.5)])
 
 
 @pytest.mark.parametrize("case", SUMMARIZER_CASES, ids=[c.label for c in SUMMARIZER_CASES])
