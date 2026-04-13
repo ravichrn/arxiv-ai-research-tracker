@@ -9,12 +9,14 @@ A research assistant that fetches the latest AI papers from arXiv, indexes them 
 ### Multi-Agent Supervisor
 The entry point is a natural language supervisor that understands your intent and routes it to the right sub-agent automatically. You no longer pick topics from a menu — just describe what you want:
 
-- *"Fetch recent NLP papers"* → triggers ingestion for cs.CL
+- *"Fetch recent NLP papers"* → fetches from arXiv, embeds, and stores — all in one step
+- *"List saved papers"* → shows all fetched papers with their arXiv IDs and titles
 - *"Find papers on diffusion models"* → searches the local database
 - *"Summarize recent robotics work"* → retrieves and batch-summarizes papers
+- *"Summarize #2504.08123v2"* → summarizes that specific paper directly from its abstract
 - *"Fetch new ML papers then find the best ones on LLMs"* → chains fetch + search in one command
 
-The supervisor uses an LLM to extract intent, resolve topic aliases (e.g. "robotics" → cs.RO), and build an ordered execution chain for multi-step requests.
+The supervisor uses an LLM to extract intent, resolve topic aliases (e.g. "robotics" → cs.RO), and build an ordered execution chain for multi-step requests. It also resolves `#<arxiv_id>` references so you can target a specific paper by its canonical arXiv ID.
 
 ### Self-RAG Agent
 The Q&A sub-agent doesn't just retrieve and respond — it actively verifies the quality of what it returns:
@@ -26,14 +28,18 @@ The Q&A sub-agent doesn't just retrieve and respond — it actively verifies the
 ### Hybrid Search
 Retrieval combines dense vector similarity (OpenAI embeddings) with BM25 full-text search using LanceDB's hybrid query mode. Results are fused and deduplicated at the paper level, so you get the best chunk per paper rather than repeated chunks from the same abstract.
 
-### Semantic Chunking
-Paper abstracts are split at natural semantic boundaries rather than fixed token windows. This means each stored chunk represents a coherent idea, improving retrieval precision for longer abstracts.
+An optional `category_filter` parameter (e.g. `"cs.RO"`) can scope retrieval to a specific arXiv category — used by the evaluation suite to avoid cross-topic dilution when scoring retrieval precision for topic-specific queries.
+
+### Fast Chunking
+Paper abstracts are split using `RecursiveCharacterTextSplitter` with a 2000-character limit. arXiv abstracts are typically 150–300 words, so almost every abstract is stored as a single chunk — no unnecessary splitting. A character-based splitter is used deliberately: the previous semantic chunker embedded every sentence per abstract to find split boundaries, adding ~150–300 uncached API calls per 20-paper fetch with no retrieval benefit for short texts.
 
 ### Incremental Ingestion
 The tracker remembers what it has already fetched using a per-topic timestamp registry. Each arXiv category gets its own timestamp, and a single "all" key supersedes individual ones when all topics are fetched together. On subsequent runs, only newly published papers since the last fetch are retrieved — no redundant API calls or duplicate entries.
 
+Each paper is assigned its canonical arXiv ID (e.g. `2504.08123v2`) at fetch time. This ID is stored in `databases/papers_raw.jsonl` and as `arxiv_id` metadata in LanceDB, making it possible to reference, retrieve, or relate individual papers by their stable identifier across sessions.
+
 ### Resilient Fetching
-Rate limits are handled automatically via exponential backoff (tenacity) on both arXiv requests and OpenAI embedding calls. Between topics, the fetcher pauses to stay within arXiv's recommended rate. If a topic fails after retries, it's skipped gracefully and the rest continue.
+Rate limits are handled automatically via exponential backoff (tenacity) on both arXiv requests and OpenAI embedding calls. Between topics, the fetcher pauses 3 seconds to stay within arXiv's recommended rate. If a topic fails after retries, it's skipped gracefully and the rest continue.
 
 ### Three-Layer Caching
 LLM responses, embeddings, and Anthropic prompt prefixes are all cached to minimize redundant API calls:
@@ -49,7 +55,14 @@ LLM responses, embeddings, and Anthropic prompt prefixes are all cached to minim
 All user input and retrieved content passes through a sanitization layer before reaching the LLM. It detects and blocks prompt injection attempts, jailbreak patterns, role overrides, and data exfiltration requests using compiled regex patterns with Unicode normalization.
 
 ### Evaluation Suite
-DeepEval-based evaluation tests cover summarizer hallucination, answer faithfulness, and retrieval relevancy — runnable standalone or via pytest.
+DeepEval-based evaluation with four suites — runnable standalone or via pytest:
+
+- **RAG eval** (10 cases) — faithfulness, answer relevancy, and retrieval relevancy across cs.AI, cs.LG, cs.CL, and cs.RO, each category-scoped to avoid cross-topic dilution
+- **Adversarial eval** (3 cases) — queries whose topic is intentionally absent from the retrieved category; the LLM must stay grounded and not confabulate from prior knowledge
+- **No-context baseline** — same RAG queries answered without retrieval, to quantify what the pipeline adds over raw LLM knowledge
+- **Summarizer eval** (6 cases) — hallucination and coverage checks on known paper abstracts
+
+**Judge model:** `claude-opus-4-6` via DeepEval's `AnthropicModel` (cross-provider judging — avoids same-family agreement bias between the answering model and judge). Falls back to `EVAL_JUDGE_MODEL` in `.env` if `ANTHROPIC_API_KEY` is not set.
 
 ---
 
@@ -59,13 +72,15 @@ DeepEval-based evaluation tests cover summarizer hallucination, answer faithfuln
 arxiv-ai-research-tracker/
 ├── main.py                    # Entry point — calls launch_supervisor()
 ├── agents/
-│   ├── supervisor.py          # Multi-agent supervisor: routes fetch/rag/summarize, supports chaining
+│   ├── supervisor.py          # Multi-agent supervisor: routes fetch/list/rag/summarize, supports chaining
 │   ├── runner.py              # Self-RAG LangGraph agent (grade_docs → agent → hallucination_check)
 │   └── tools.py               # search_papers, search_saved_papers, add/delete saved
 ├── ingestion/
-│   └── arxiv_fetcher.py       # arXiv fetching, incremental sync, semantic chunking
+│   └── arxiv_fetcher.py       # arXiv fetching, incremental sync, character chunking, embed + store
 ├── databases/
-│   └── stores.py              # LanceDB stores, hybrid search, LLM singletons, caching
+│   ├── stores.py              # LanceDB stores, hybrid search, LLM singletons, caching
+│   ├── papers_raw.jsonl       # NDJSON cache of all fetched paper metadata (arxiv_id, title, abstract, …)
+│   └── last_run.txt           # Per-topic fetch timestamps (JSON)
 ├── guardrails/
 │   └── sanitizer.py           # Prompt injection prevention (20+ patterns)
 ├── evaluation/
@@ -105,10 +120,11 @@ The supervisor starts immediately and accepts natural language:
 ```
 [Supervisor Ready] Ask me to fetch papers, search, summarize, or chain tasks.
 Examples:
-  - 'fetch recent robotics papers'
+  - 'fetch recent robotics papers'          (fetch + embed in one step)
+  - 'list saved papers'                     (show all papers with arXiv IDs)
   - 'find papers on diffusion models'
+  - 'summarize #2504.08123v2'               (summarize a specific paper by arXiv ID)
   - 'fetch NLP papers then find the best on transformers'
-  - 'summarize recent cs.AI papers'
 
 You:
 ```
@@ -131,8 +147,11 @@ Ollama is auto-detected at `http://localhost:11434`. If unavailable, the summari
 ### Standalone runner
 
 ```bash
-uv run python -m evaluation.run_eval             # default sample size
-uv run python -m evaluation.run_eval --samples 5 # custom sample size
+uv run python -m evaluation.run_eval                        # all suites
+uv run python -m evaluation.run_eval --suite rag            # RAG only
+uv run python -m evaluation.run_eval --suite adversarial    # adversarial only
+uv run python -m evaluation.run_eval --suite baseline       # no-context baseline
+uv run python -m evaluation.run_eval --samples 5            # custom summarizer sample size
 ```
 
 ### pytest suite
@@ -143,7 +162,7 @@ uv run pytest evaluation/test_summarizer.py      # summarizer only
 uv run pytest evaluation/test_rag.py             # RAG only
 ```
 
-> **Note:** DeepEval metrics make LLM calls. Ensure `OPENAI_API_KEY` is set before running evals.
+> **Note:** DeepEval metrics make LLM calls. Set `ANTHROPIC_API_KEY` to use `claude-opus-4-6` as the judge (recommended). If unset, the judge falls back to `EVAL_JUDGE_MODEL` in `.env` (defaults to `gpt-4o`).
 
 ---
 

@@ -21,6 +21,7 @@ Sub-agents:
 """
 
 import json
+import re as _re
 from typing import Annotated
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -32,7 +33,13 @@ from agents.runner import rag_graph
 from agents.tools import _format_docs
 from databases.stores import hybrid_search, llm_agent, papers_store
 from guardrails.sanitizer import InputRejected, validate_user_input
-from ingestion.arxiv_fetcher import TOPICS, fetch_and_summarize_papers
+from ingestion.arxiv_fetcher import (
+    TOPICS,
+    fetch_papers,
+    get_paper_by_arxiv_id,
+    get_paper_by_title,
+    list_papers,
+)
 
 _MAX_CHAIN_STEPS = 3
 _MAX_HISTORY_TURNS = 10
@@ -63,13 +70,14 @@ You are a routing assistant for an AI research paper tool.
 
 Given the user request, respond with a JSON object only (no markdown, no explanation):
 {{
-  "steps": [...],      // ordered list from: "fetch", "rag", "summarize"
+  "steps": [...],      // ordered list from: "fetch", "list", "rag", "summarize"
   "topics": [...],     // arXiv topic codes needed for fetch: cs.AI, cs.LG, cs.CL, cs.RO
   "rag_query": "..."   // refined search query for rag/summarize steps (empty string if not needed)
 }}
 
 Rules:
-- Use "fetch" when the user wants to ingest/download new papers.
+- Use "fetch" when the user wants to download/retrieve new papers from arXiv (display only).
+- Use "list" when the user wants to see saved/fetched papers with their IDs and titles.
 - Use "rag" when the user wants to search or ask questions about papers.
 - Use "summarize" when the user wants a summary or overview of papers.
 - Multi-step requests get multiple entries in "steps" (max {max_steps}).
@@ -90,11 +98,34 @@ class SupervisorState(TypedDict):
     pending_chain: list[str]  # remaining steps in a multi-step request
     rag_query: str  # refined query for rag/summarize nodes
     last_result: str  # output from the last completed sub-agent
+    pinned_paper: str  # title of a specific paper pinned via #N reference (empty = no pin)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _resolve_paper_ref(query: str) -> tuple[str, str]:
+    """Replace #<arxiv_id> references with paper titles. Returns (resolved_query, pinned_title).
+
+    Matches patterns like #2301.12345v2 or #2301.12345.
+    pinned_title is non-empty only when exactly one paper is referenced, so downstream
+    nodes can retrieve that paper directly instead of doing a broad similarity search.
+    """
+    pinned: list[str] = []
+
+    def _replace(m: _re.Match) -> str:  # type: ignore[type-arg]
+        paper = get_paper_by_arxiv_id(m.group(1))
+        if paper:
+            pinned.append(paper["title"])
+            return f'"{paper["title"]}"'
+        return m.group(0)
+
+    # Match #2301.12345v2 or #2301.12345 (digits, dot, digits, optional version)
+    resolved = _re.sub(r"#(\d{4}\.\d{4,5}(?:v\d+)?)", _replace, query)
+    pinned_title = pinned[0] if len(pinned) == 1 else ""
+    return resolved, pinned_title
+
+
 def _last_human_content(state: SupervisorState) -> str:
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
@@ -151,7 +182,7 @@ def route_node(state: SupervisorState) -> dict:
         return {"intent": next_intent, "pending_chain": pending}
 
     # First call — parse intent from the user query.
-    query = _last_human_content(state)
+    query, pinned_title = _resolve_paper_ref(_last_human_content(state))
     prompt = _ROUTE_PROMPT.format(query=query, max_steps=_MAX_CHAIN_STEPS)
     raw = str(llm_agent.invoke(prompt).content)
     parsed = _parse_route(raw)
@@ -178,15 +209,27 @@ def route_node(state: SupervisorState) -> dict:
         "resolved_topics": resolved,
         "pending_chain": remaining,
         "rag_query": rag_query,
+        "pinned_paper": pinned_title,
     }
 
 
 def ingestion_node(state: SupervisorState) -> dict:
-    """Fetch and ingest new arXiv papers for the resolved topics."""
+    """Fetch paper metadata from arXiv, display results, and index into vector store."""
     topics = state.get("resolved_topics") or list(TOPICS)
     print(f"  [Supervisor] Fetching topics: {', '.join(topics)}")
-    fetch_and_summarize_papers(topics=topics)
-    result = f"Fetched and indexed new papers for: {', '.join(topics)}."
+    n = fetch_papers(topics=topics)
+    result = (
+        f"Fetched and indexed {n} new paper(s) for: {', '.join(topics)}. You can now search them."
+        if n > 0
+        else f"No new papers found for: {', '.join(topics)}."
+    )
+    return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+
+def list_node(state: SupervisorState) -> dict:
+    """List all saved papers with their arXiv IDs and titles."""
+    print("  [Supervisor] Listing saved papers...")
+    result = list_papers()
     return {"last_result": result, "messages": [AIMessage(content=result)]}
 
 
@@ -207,8 +250,28 @@ def rag_node(state: SupervisorState) -> dict:
 
 
 def summarize_node(state: SupervisorState) -> dict:
-    """Retrieve a batch of papers and return an LLM-generated summary."""
+    """Retrieve papers and return an LLM-generated summary.
+
+    If a specific paper was pinned via #N, retrieve it directly from the fetch
+    session and summarize only that paper — skipping the broad similarity search.
+    """
     query = state.get("rag_query") or _last_human_content(state)
+    pinned = state.get("pinned_paper", "")
+
+    if pinned:
+        paper = get_paper_by_title(pinned)
+        if paper:
+            print(f"  [Supervisor] Summarizing pinned paper: {pinned}")
+            prompt = (
+                "You are a research assistant. Summarize the following paper in 5-7 bullet points, "
+                "highlighting the problem it solves, key methods, and main contributions.\n\n"
+                f"Title: {paper['title']}\n"
+                f"Authors: {paper['authors']}\n"
+                f"Abstract: {paper['abstract']}"
+            )
+            answer = str(llm_agent.invoke(prompt).content)
+            return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
     print(f"  [Supervisor] Summarizing papers for: {query}")
     docs = hybrid_search(papers_store, query, k=5)
     formatted = _format_docs(docs)
@@ -225,10 +288,11 @@ def clarify_node(state: SupervisorState) -> dict:
     """Ask the user to rephrase when intent is unclear."""
     clarification = (
         "I'm not sure what you'd like to do. You can ask me to:\n"
-        "- **Fetch** new papers (e.g. 'fetch recent NLP papers')\n"
+        "- **Fetch** new papers (e.g. 'fetch recent NLP papers') — displays results immediately\n"
+        "- **Index** fetched papers (e.g. 'index papers') — embeds them so you can search\n"
         "- **Search** for papers (e.g. 'find papers on diffusion models')\n"
         "- **Summarize** papers (e.g. 'summarize recent robotics papers')\n"
-        "- **Chain** steps (e.g. 'fetch ML papers then find the best on LLMs')"
+        "- **Chain** steps (e.g. 'fetch ML papers then index then find the best on LLMs')"
     )
     return {"last_result": clarification, "messages": [AIMessage(content=clarification)]}
 
@@ -245,6 +309,8 @@ def _dispatch_intent(state: SupervisorState) -> str:
     intent = state.get("intent", "unknown")
     if intent == "fetch":
         return "ingestion"
+    if intent == "list":
+        return "list"
     if intent == "rag":
         return "rag"
     if intent == "summarize":
@@ -268,6 +334,7 @@ def _build_supervisor_graph():
 
     graph.add_node("route", route_node)
     graph.add_node("ingestion", ingestion_node)
+    graph.add_node("list", list_node)
     graph.add_node("rag", rag_node)
     graph.add_node("summarize", summarize_node)
     graph.add_node("clarify", clarify_node)
@@ -277,7 +344,7 @@ def _build_supervisor_graph():
     graph.add_conditional_edges("route", _dispatch_intent)
 
     # After each capability, either chain to next step or finalize
-    for cap in ("ingestion", "rag", "summarize", "clarify"):
+    for cap in ("ingestion", "list", "rag", "summarize", "clarify"):
         graph.add_conditional_edges(
             cap, _route_after_capability, {"route": "route", "finalize": "finalize"}
         )
@@ -296,11 +363,12 @@ _supervisor_graph = _build_supervisor_graph()
 def launch_supervisor() -> None:
     chat_history: list[HumanMessage | AIMessage] = []
 
-    print("\n[Supervisor Ready] Ask me to fetch papers, search, summarize, or chain tasks.")
+    print("\n[Supervisor Ready] Ask me to fetch papers, index, search, summarize, or chain tasks.")
     print("Examples:")
-    print("  - 'fetch recent robotics papers'")
+    print("  - 'fetch recent robotics papers'          (fast — no embedding)")
+    print("  - 'index papers'                          (embed fetched papers for search)")
     print("  - 'find papers on diffusion models'")
-    print("  - 'fetch NLP papers then summarize the best on transformers'")
+    print("  - 'fetch NLP papers then index then find the best on transformers'")
     print("  - 'summarize recent cs.AI papers'\n")
 
     while True:
@@ -324,6 +392,7 @@ def launch_supervisor() -> None:
                     "pending_chain": [],
                     "rag_query": "",
                     "last_result": "",
+                    "pinned_paper": "",
                 }
             )
             answer = result.get("last_result") or str(result["messages"][-1].content)
