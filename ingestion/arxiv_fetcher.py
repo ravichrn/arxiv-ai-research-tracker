@@ -1,12 +1,11 @@
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import arxiv
 from langchain_core.documents import Document
-from langchain_experimental.text_splitter import SemanticChunker
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from databases.stores import llm_fast, papers_store
@@ -129,42 +128,97 @@ def _fetch_existing_urls() -> set[str]:
         return set()
 
 
+def _arxiv_id(result: arxiv.Result) -> str:
+    """Return the short arXiv ID, e.g. '2301.12345v2'."""
+    return result.get_short_id()
+
+
+def get_paper_by_title(title: str) -> dict | None:
+    """Look up a paper from papers_raw.jsonl by exact title (case-insensitive)."""
+    if not _RAW_PAPERS_FILE.exists():
+        return None
+    title_lower = title.lower().strip()
+    for line in _RAW_PAPERS_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            paper = json.loads(line)
+            if paper.get("title", "").lower().strip() == title_lower:
+                return paper
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return None
+
+
+def list_papers() -> str:
+    """Return a formatted list of all saved papers with arXiv IDs and titles."""
+    if not _RAW_PAPERS_FILE.exists():
+        return "No papers saved yet. Run a fetch first."
+    papers = []
+    for line in _RAW_PAPERS_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            papers.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    if not papers:
+        return "No papers saved yet. Run a fetch first."
+    lines = [f"Saved papers ({len(papers)} total):\n"]
+    for p in papers:
+        arxiv_id = p.get("arxiv_id") or p.get("url", "")
+        lines.append(f"  [{arxiv_id}]  {p.get('title', '(no title)')}")
+    lines.append("\nReference any paper with #<arxiv_id>, e.g. 'summarize #2504.08123v1'")
+    return "\n".join(lines)
+
+
+def get_paper_by_arxiv_id(arxiv_id: str) -> dict | None:
+    """Look up a paper from papers_raw.jsonl by its arXiv ID (e.g. '2301.12345v2').
+
+    Matches on both versioned ('2301.12345v2') and base ('2301.12345') forms.
+    Returns the raw paper dict, or None if not found.
+    """
+    if not _RAW_PAPERS_FILE.exists():
+        return None
+    base_id = arxiv_id.split("v")[0]
+    for line in _RAW_PAPERS_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            paper = json.loads(line)
+            url = paper.get("arxiv_id", "") or paper.get("url", "")
+            if arxiv_id in url or base_id in url:
+                return paper
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return None
+
+
 def _print_paper(result: arxiv.Result) -> None:
     authors = [a.name for a in result.authors]
     author_str = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
     print(f"\n{'─' * 70}")
-    print(f"Title    : {result.title}")
-    print(f"Authors  : {author_str}")
-    print(f"Topics   : {', '.join(result.categories)}")
-    print(f"Published: {result.published.strftime('%Y-%m-%d')}")
-    print(f"URL      : {result.entry_id}")
+    print(f"[{_arxiv_id(result)}]")
+    print(f"  Title    : {result.title}")
+    print(f"  Authors  : {author_str}")
+    print(f"  Topics   : {', '.join(result.categories)}")
+    print(f"  Published: {result.published.strftime('%Y-%m-%d')}")
 
 
-def _get_chunker() -> SemanticChunker:
-    """Build a SemanticChunker lazily — requires the embedding model to be available."""
-    from langchain_openai import OpenAIEmbeddings
-
-    return SemanticChunker(
-        embeddings=OpenAIEmbeddings(),
-        breakpoint_threshold_type="percentile",  # split where embedding distance > 95th pct
-        breakpoint_threshold_amount=95,
-    )
-
-
-# Module-level singleton — constructed on first _build_docs call.
-_chunker: SemanticChunker | None = None
+# arXiv abstracts are 150-300 words; chunk_size=2000 means almost all are a single chunk.
+# RecursiveCharacterTextSplitter does no embedding — purely character-based, near-instant.
+_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=100)
 
 
 def _build_docs(result: arxiv.Result) -> list[Document]:
-    """Split an arXiv abstract into semantic chunks and return one Document per chunk.
+    """Split an arXiv abstract into chunks and return one Document per chunk.
 
     Each chunk inherits the paper's metadata plus chunk-level fields so that
     retrieval results can be deduplicated back to paper level.
     """
-    global _chunker
-    if _chunker is None:
-        _chunker = _get_chunker()
-
     base_meta = {
         "title": result.title,
         "authors": ", ".join(a.name for a in result.authors),
@@ -173,90 +227,145 @@ def _build_docs(result: arxiv.Result) -> list[Document]:
         "published": result.published.isoformat(),
     }
 
-    chunks = _chunker.split_text(result.summary)
-    # SemanticChunker may return the full text unsplit for short abstracts — treat as one chunk.
-    docs = []
-    for i, chunk_text in enumerate(chunks):
-        docs.append(
-            Document(
-                page_content=chunk_text,
-                metadata={
-                    **base_meta,
-                    "chunk_id": f"{result.entry_id}#{i}",
-                    "chunk_index": i,
-                    "total_chunks": len(chunks),
-                },
-            )
+    chunks = _splitter.split_text(result.summary)
+    return [
+        Document(
+            page_content=chunk_text,
+            metadata={
+                **base_meta,
+                "chunk_id": f"{result.entry_id}#{i}",
+                "chunk_index": i,
+                "total_chunks": len(chunks),
+            },
         )
-    return docs
+        for i, chunk_text in enumerate(chunks)
+    ]
 
 
-def fetch_and_summarize_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> None:
+_RAW_PAPERS_FILE = Path(__file__).parent.parent / "databases" / "papers_raw.jsonl"
+
+
+def _load_raw_urls() -> set[str]:
+    """Return the set of URLs already saved in papers_raw.jsonl."""
+    if not _RAW_PAPERS_FILE.exists():
+        return set()
+    urls = set()
+    for line in _RAW_PAPERS_FILE.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                urls.add(json.loads(line)["url"])
+            except (json.JSONDecodeError, KeyError):
+                pass
+    return urls
+
+
+def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> int:
+    """Fetch paper metadata from arXiv, print results, and save to papers_raw.jsonl.
+
+    No embedding or LanceDB writes — returns immediately after arXiv API calls.
+    Returns the number of new papers saved.
+    """
     topics = topics or list(TOPICS)
     fetched_all = set(topics) >= set(TOPICS)
     now_str = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
 
     print(f"Fetching {len(topics)} topic(s)...")
 
-    # Load all existing URLs once — avoids one DB query per candidate paper.
+    # Skip papers already saved (raw file) or already indexed (LanceDB).
+    raw_urls = _load_raw_urls()
     existing_urls = _fetch_existing_urls()
+    known_urls = raw_urls | existing_urls
     seen_ids: set[str] = set()
     new_count = 0
+    new_papers: list[dict] = []
 
-    for i, topic in enumerate(topics):
-        if i > 0:
-            time.sleep(5)  # pause between topics to avoid rate-limiting
+    with _RAW_PAPERS_FILE.open("a") as fh:
+        for i, topic in enumerate(topics):
+            if i > 0:
+                time.sleep(3)  # arXiv recommended minimum between bulk requests
 
-        since = _get_since(topic)
-        since_str = since.strftime("%Y%m%d%H%M%S")
-        since_label = since.strftime("%Y-%m-%d %H:%M UTC")
-        print(f"\n[{topic}] fetching since {since_label}...")
+            since = _get_since(topic)
+            since_str = since.strftime("%Y%m%d%H%M%S")
+            since_label = since.strftime("%Y-%m-%d %H:%M UTC")
+            print(f"\n[{topic}] fetching since {since_label}...")
 
-        query = f"cat:{topic} AND submittedDate:[{since_str} TO {now_str}]"
-        search = arxiv.Search(
-            query=query,
-            max_results=max_per_topic,
-            sort_by=arxiv.SortCriterion.SubmittedDate,
-        )
+            query = f"cat:{topic} AND submittedDate:[{since_str} TO {now_str}]"
+            search = arxiv.Search(
+                query=query,
+                max_results=max_per_topic,
+                sort_by=arxiv.SortCriterion.SubmittedDate,
+            )
 
-        # Collect candidates (skip already-known papers)
-        candidates = []
-        try:
-            for result in _fetch_results(search):
-                if result.entry_id in seen_ids or result.entry_id in existing_urls:
-                    continue
-                seen_ids.add(result.entry_id)
-                candidates.append(result)
-        except arxiv.HTTPError as e:
-            print(f"\n[{topic}] skipped after retries — arXiv HTTP {e.status}. Try again later.")
-            continue
-
-        if not candidates:
-            print(f"\n[{topic}] no new papers.")
-            continue
-
-        # Build + chunk docs in parallel — each paper is an independent embedding call.
-        docs: list[Document] = []
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {pool.submit(_build_docs, r): r for r in candidates}
-            for future in as_completed(futures):
-                result = futures[future]
-                try:
-                    chunks = future.result()
-                    docs.extend(chunks)
-                    existing_urls.add(result.entry_id)
+            topic_count = 0
+            try:
+                for result in _fetch_results(search):
+                    if result.entry_id in seen_ids or result.entry_id in known_urls:
+                        continue
+                    seen_ids.add(result.entry_id)
+                    known_urls.add(result.entry_id)
+                    paper = {
+                        "arxiv_id": _arxiv_id(result),
+                        "url": result.entry_id,
+                        "title": result.title,
+                        "authors": ", ".join(a.name for a in result.authors),
+                        "abstract": result.summary,
+                        "categories": ", ".join(result.categories),
+                        "published": result.published.isoformat(),
+                    }
                     _print_paper(result)
-                    if len(chunks) > 1:
-                        print(f"  → {len(chunks)} semantic chunks")
-                except Exception as e:
-                    print(f"  [error] {result.title[:60]}: {e}")
+                    fh.write(json.dumps(paper) + "\n")
+                    new_papers.append(paper)
+                    topic_count += 1
+            except arxiv.HTTPError as e:
+                print(f"\n[{topic}] skipped after retries — arXiv HTTP {e.status}.")
+                continue
 
-        if docs:
-            papers_store.add_documents(docs)
-
-        new_count += len(docs)
-        print(f"\n[{topic}] added {len(docs)} new papers.")
+            if topic_count == 0:
+                print(f"\n[{topic}] no new papers.")
+            else:
+                print(f"\n[{topic}] {topic_count} new papers saved.")
+            new_count += topic_count
 
     _save_last_run(topics, fetched_all)
     print(f"\n{'=' * 70}")
-    print(f"Total: {new_count} new papers added. Database updated.")
+    print(f"Total: {new_count} new papers fetched.")
+    if new_count > 0:
+        print("Tip: Reference any paper above by its arXiv ID, e.g. 'summarize #2301.12345v2'")
+        _embed_and_store(new_papers)
+    return new_count
+
+
+def _embed_and_store(papers: list[dict]) -> int:
+    """Embed a list of raw paper dicts and store them in LanceDB. Returns count stored."""
+    if not papers:
+        return 0
+    print(f"Indexing {len(papers)} paper(s) into vector store...")
+    docs: list[Document] = []
+    for paper in papers:
+        chunks = _splitter.split_text(paper["abstract"])
+        for i, chunk_text in enumerate(chunks):
+            docs.append(
+                Document(
+                    page_content=chunk_text,
+                    metadata={
+                        "arxiv_id": paper.get("arxiv_id", ""),
+                        "title": paper["title"],
+                        "authors": paper["authors"],
+                        "url": paper["url"],
+                        "categories": paper["categories"],
+                        "published": paper["published"],
+                        "chunk_id": f"{paper['url']}#{i}",
+                        "chunk_index": i,
+                        "total_chunks": len(chunks),
+                    },
+                )
+            )
+    papers_store.add_documents(docs)
+    print(f"Indexed {len(papers)} papers ({len(docs)} chunks) into vector store.")
+    return len(papers)
+
+
+def fetch_and_summarize_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> None:
+    """Fetch and index papers. Kept for backwards compatibility."""
+    fetch_papers(max_per_topic=max_per_topic, topics=topics)

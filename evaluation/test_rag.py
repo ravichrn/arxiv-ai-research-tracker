@@ -8,19 +8,39 @@ Run with:  deepeval test run evaluation/test_rag.py
        or: pytest evaluation/test_rag.py -v
 """
 
+import os
+
 import pytest
 from deepeval import assert_test
 from deepeval.metrics import AnswerRelevancyMetric, ContextualRelevancyMetric, FaithfulnessMetric
+from deepeval.models import AnthropicModel
 from deepeval.test_case import LLMTestCase
 
 from databases.stores import hybrid_search, papers_store
 from databases.stores import llm_agent as llm
-from evaluation.datasets import RAG_CASES
+from evaluation.datasets import ADVERSARIAL_RAG_CASES, RAG_CASES
 
 
-def _retrieve(query: str, k: int = 5) -> list[str]:
+def _make_judge():
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return AnthropicModel(
+            model="claude-opus-4-6",
+            cost_per_input_token=0.000015,
+            cost_per_output_token=0.000075,
+        )
+    fallback = os.getenv("EVAL_JUDGE_MODEL", "gpt-4o")
+    return fallback
+
+
+_JUDGE = _make_judge()
+
+
+def _retrieve(query: str, k: int = 5, category: str | None = None) -> list[str]:
     try:
-        docs = hybrid_search(papers_store, query, k=k)
+        docs = hybrid_search(papers_store, query, k=k, category_filter=category)
+        if not docs and category:
+            # No papers for this category in the DB — fall back to unfiltered search.
+            docs = hybrid_search(papers_store, query, k=k)
     except Exception:
         return []
     return [f"Title: {d.metadata.get('title')}\n{d.page_content}" for d in docs]
@@ -38,7 +58,7 @@ def _answer(query: str, context_chunks: list[str]) -> str:
 @pytest.mark.parametrize("case", RAG_CASES, ids=[c.label for c in RAG_CASES])
 def test_rag_faithfulness(case):
     """Agent answer must be grounded in the retrieved context (no hallucination)."""
-    context = _retrieve(case.query)
+    context = _retrieve(case.query, category=case.category)
     if not context:
         pytest.skip("DB is empty — run main.py to populate papers first.")
 
@@ -50,13 +70,13 @@ def test_rag_faithfulness(case):
         retrieval_context=context,
     )
 
-    assert_test(test_case, [FaithfulnessMetric(threshold=0.7)])
+    assert_test(test_case, [FaithfulnessMetric(threshold=0.7, model=_JUDGE)])
 
 
 @pytest.mark.parametrize("case", RAG_CASES, ids=[c.label for c in RAG_CASES])
 def test_rag_answer_relevancy(case):
     """Agent answer must be relevant to the user query."""
-    context = _retrieve(case.query)
+    context = _retrieve(case.query, category=case.category)
     if not context:
         pytest.skip("DB is empty — run main.py to populate papers first.")
 
@@ -68,7 +88,7 @@ def test_rag_answer_relevancy(case):
         retrieval_context=context,
     )
 
-    assert_test(test_case, [AnswerRelevancyMetric(threshold=0.7)])
+    assert_test(test_case, [AnswerRelevancyMetric(threshold=0.7, model=_JUDGE)])
 
 
 @pytest.mark.parametrize("case", RAG_CASES, ids=[c.label for c in RAG_CASES])
@@ -82,7 +102,7 @@ def test_rag_context_relevancy(case):
     the inherent breadth of a multi-topic corpus.
     Threshold 0.5: at least 2 of 3 returned docs must be on-topic.
     """
-    context = _retrieve(case.query, k=3)
+    context = _retrieve(case.query, k=3, category=case.category)
     if not context:
         pytest.skip("DB is empty — run main.py to populate papers first.")
 
@@ -92,4 +112,30 @@ def test_rag_context_relevancy(case):
         retrieval_context=context,
     )
 
-    assert_test(test_case, [ContextualRelevancyMetric(threshold=0.5)])
+    assert_test(test_case, [ContextualRelevancyMetric(threshold=0.5, model=_JUDGE)])
+
+
+@pytest.mark.parametrize(
+    "case", ADVERSARIAL_RAG_CASES, ids=[c.label for c in ADVERSARIAL_RAG_CASES]
+)
+def test_adversarial_faithfulness(case):
+    """Adversarial: context is off-topic — the LLM must stay grounded and not hallucinate
+    from prior knowledge. Faithfulness must still pass even when the answer is a
+    grounded 'I cannot answer from the provided context.'
+    """
+    context = _retrieve(case.query, k=5, category=case.category)
+    if not context:
+        context = _retrieve(case.query, k=5)
+    if not context:
+        pytest.skip("DB is empty — run main.py to populate papers first.")
+
+    answer = _answer(case.query, context)
+
+    test_case = LLMTestCase(
+        input=case.query,
+        actual_output=answer,
+        retrieval_context=context,
+    )
+
+    # Only faithfulness — relevancy is expected to be low (that's the point)
+    assert_test(test_case, [FaithfulnessMetric(threshold=0.7, model=_JUDGE)])

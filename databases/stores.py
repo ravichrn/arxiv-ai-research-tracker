@@ -159,20 +159,27 @@ papers_store = _LazyProxy(_make_papers_store)
 saved_store = _LazyProxy(_make_saved_store)
 
 
-def hybrid_search(store, query: str, k: int = 5) -> list:
+def hybrid_search(store, query: str, k: int = 5, category_filter: str | None = None) -> list:
     """Hybrid vector + full-text search with chunk deduplication.
 
     Retrieves up to k*3 candidate chunks via hybrid search (dense + BM25),
     then deduplicates to return at most *k* unique papers (one best chunk each).
 
     Falls back to pure vector search if the FTS index is not yet built.
+
+    Args:
+        category_filter: Optional arXiv category code (e.g. "cs.RO") to restrict
+                         results to papers whose ``categories`` field contains it.
     """
     _ensure_fts_index(store)
+    # LangChain's LanceDB integration stores metadata as a Struct column with named
+    # sub-fields — access via dot notation, not as a flat column or JSON string.
+    filter_expr = f"metadata.categories LIKE '%{category_filter}%'" if category_filter else None
     try:
-        chunks = store.similarity_search(query, k=k * 3, query_type="hybrid")
+        chunks = store.similarity_search(query, k=k * 3, query_type="hybrid", filter=filter_expr)
     except Exception:
         # FTS index missing or incompatible version — degrade gracefully.
-        chunks = store.similarity_search(query, k=k)
+        chunks = store.similarity_search(query, k=k, filter=filter_expr)
 
     # Deduplicate: keep the first (highest-ranked) chunk per paper URL.
     seen: dict[str, object] = {}
