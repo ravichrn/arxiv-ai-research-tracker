@@ -9,13 +9,14 @@ Usage:
 
 import argparse
 import random
-from deepeval.metrics import HallucinationMetric, FaithfulnessMetric, AnswerRelevancyMetric
-from deepeval.test_case import LLMTestCase
-from deepeval import evaluate
 
-from databases.stores import papers_store, llm_agent as llm
-from ingestion.arxiv_fetcher import summarize_text
+from deepeval.metrics import AnswerRelevancyMetric, FaithfulnessMetric, HallucinationMetric
+from deepeval.test_case import LLMTestCase
+
+from databases.stores import hybrid_search, papers_store
+from databases.stores import llm_agent as llm
 from evaluation.datasets import RAG_CASES
+from ingestion.arxiv_fetcher import summarize_text
 
 
 def _score(metric, test_case: LLMTestCase) -> tuple[float, bool]:
@@ -28,18 +29,21 @@ def run_summarizer_eval(n_samples: int) -> None:
     print(f"SUMMARIZER EVAL  (n={n_samples} random DB papers)")
     print(f"{'='*60}")
 
-    all_docs = papers_store.get()
-    if not all_docs["ids"]:
+    try:
+        rows = papers_store.get_table().search().select(["text", "title"]).to_list()
+    except Exception:
+        rows = []
+    if not rows:
         print("  DB is empty — run main.py first.")
         return
 
-    indices = random.sample(range(len(all_docs["ids"])), min(n_samples, len(all_docs["ids"])))
+    sample = random.sample(rows, min(n_samples, len(rows)))
     hallucination_metric = HallucinationMetric(threshold=0.5)
 
     scores = []
-    for i in indices:
-        abstract = all_docs["documents"][i]
-        title = all_docs["metadatas"][i].get("title", "unknown")
+    for row in sample:
+        abstract = row.get("text", "")
+        title = row.get("title", "unknown")
         summary = summarize_text(abstract)
 
         test_case = LLMTestCase(
@@ -61,8 +65,11 @@ def run_rag_eval() -> None:
     print(f"RAG EVAL  ({len(RAG_CASES)} test queries)")
     print(f"{'='*60}")
 
-    docs = papers_store.get()
-    if not docs["ids"]:
+    try:
+        probe = papers_store.get_table().search().limit(1).to_list()
+    except Exception:
+        probe = []
+    if not probe:
         print("  DB is empty — run main.py first.")
         return
 
@@ -70,7 +77,7 @@ def run_rag_eval() -> None:
     relevancy = AnswerRelevancyMetric(threshold=0.7)
 
     for case in RAG_CASES:
-        retrieved = papers_store.similarity_search(case.query, k=5)
+        retrieved = hybrid_search(papers_store, case.query, k=5)
         if not retrieved:
             print(f"  [SKIP] No results for: {case.query}")
             continue
@@ -95,7 +102,9 @@ def run_rag_eval() -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--samples", type=int, default=3, help="Papers to sample for summarizer eval")
+    parser.add_argument(
+        "--samples", type=int, default=3, help="Papers to sample for summarizer eval"
+    )
     args = parser.parse_args()
 
     run_summarizer_eval(args.samples)

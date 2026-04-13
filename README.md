@@ -1,29 +1,55 @@
 # arxiv-ai-research-tracker
 
-A research assistant that fetches the latest AI research papers from arXiv, enables follow-up Q&A via an intelligent agent, and helps you curate a personal collection of papers for future reference.
+A research assistant that fetches the latest AI papers from arXiv, indexes them into a searchable vector store, and lets you explore them through a conversational multi-agent interface — all from the terminal.
 
 ---
 
 ## Features
 
-- **Topic-selective ingestion** — choose which arXiv categories to fetch (cs.AI, cs.LG, cs.CL, cs.RO) at startup; avoids unnecessary API calls
-- **Incremental fetching** — tracks last-run timestamp in `databases/last_run.txt`; only fetches papers published since the previous run (default fallback: 14 days)
-- **Multi-topic deduplication** — URL-based set lookup prevents the same paper being stored twice across overlapping topic feeds
-- **arXiv rate-limit resilience** — custom `arxiv.Client` with 3 s delay between pages, 5 retries, 5 s pause between topics, and graceful per-topic 429 handling (skips topic, continues rest)
-- **Multi-LLM routing**
-  - Summarizer: Ollama/Llama (local, zero cost) → falls back to OpenAI `gpt-4o-mini`
-  - Agent: OpenAI `gpt-4o` (default) or Anthropic Claude (set `AGENT_LLM=claude`)
-- **LangGraph agent** — explicit `StateGraph` with inspectable agent → tools → agent loop; 10-turn conversation memory with automatic history trimming
-- **Four agent tools** — `search_papers`, `search_saved_papers`, `add_paper_to_saved`, `delete_paper_from_saved`
-- **LanceDB vector store** — embedded, columnar, SQL-style filters; replaces ChromaDB; single shared connection for both `papers` and `saved` tables
-- **Three-layer caching**
-  - SQLite LLM response cache (via `langchain_community.cache.SQLiteCache`)
-  - Disk-backed embedding cache with 30-day TTL (via `diskcache`)
-  - Anthropic prompt caching header (`anthropic-beta: prompt-caching-2024-07-31`)
-- **Lazy loading** — all heavy packages (LanceDB, OpenAI, Ollama, embeddings) deferred to first use via `_LazyProxy`; startup time ~2 s, memory ~65 MB
-- **Parallel ingestion** — documents built concurrently with `ThreadPoolExecutor(max_workers=4)`
-- **LangSmith tracing** — zero-code auto-instrumentation via environment variables
-- **DeepEval evaluation suite** — hallucination, faithfulness, and answer relevancy metrics with standalone runner and pytest integration
+### Multi-Agent Supervisor
+The entry point is a natural language supervisor that understands your intent and routes it to the right sub-agent automatically. You no longer pick topics from a menu — just describe what you want:
+
+- *"Fetch recent NLP papers"* → triggers ingestion for cs.CL
+- *"Find papers on diffusion models"* → searches the local database
+- *"Summarize recent robotics work"* → retrieves and batch-summarizes papers
+- *"Fetch new ML papers then find the best ones on LLMs"* → chains fetch + search in one command
+
+The supervisor uses an LLM to extract intent, resolve topic aliases (e.g. "robotics" → cs.RO), and build an ordered execution chain for multi-step requests.
+
+### Self-RAG Agent
+The Q&A sub-agent doesn't just retrieve and respond — it actively verifies the quality of what it returns:
+
+1. **Document grading** — each retrieved chunk is scored for relevance before the answer is generated; irrelevant results are filtered out
+2. **Query rewriting** — if retrieval quality is poor, the agent automatically reformulates the query and retries (up to 2 times)
+3. **Hallucination checking** — the generated answer is checked against the retrieved context; if it's not grounded, the agent rewrites and retries before delivering a response with a disclaimer
+
+### Hybrid Search
+Retrieval combines dense vector similarity (OpenAI embeddings) with BM25 full-text search using LanceDB's hybrid query mode. Results are fused and deduplicated at the paper level, so you get the best chunk per paper rather than repeated chunks from the same abstract.
+
+### Semantic Chunking
+Paper abstracts are split at natural semantic boundaries rather than fixed token windows. This means each stored chunk represents a coherent idea, improving retrieval precision for longer abstracts.
+
+### Incremental Ingestion
+The tracker remembers what it has already fetched using a per-topic timestamp registry. Each arXiv category gets its own timestamp, and a single "all" key supersedes individual ones when all topics are fetched together. On subsequent runs, only newly published papers since the last fetch are retrieved — no redundant API calls or duplicate entries.
+
+### Resilient Fetching
+Rate limits are handled automatically via exponential backoff (tenacity) on both arXiv requests and OpenAI embedding calls. Between topics, the fetcher pauses to stay within arXiv's recommended rate. If a topic fails after retries, it's skipped gracefully and the rest continue.
+
+### Three-Layer Caching
+LLM responses, embeddings, and Anthropic prompt prefixes are all cached to minimize redundant API calls:
+- SQLite cache for LLM responses (shared across runs)
+- Disk-backed embedding cache with a 30-day TTL using diskcache
+- Anthropic prompt caching header for Claude-based deployments
+
+### Multi-LLM Support
+- **Summarizer** — uses a local Ollama model (llama3.2) if available, falls back to OpenAI gpt-4o-mini
+- **Agent** — OpenAI gpt-4o by default; switch to Anthropic Claude by setting `AGENT_LLM=claude`
+
+### Guardrails
+All user input and retrieved content passes through a sanitization layer before reaching the LLM. It detects and blocks prompt injection attempts, jailbreak patterns, role overrides, and data exfiltration requests using compiled regex patterns with Unicode normalization.
+
+### Evaluation Suite
+DeepEval-based evaluation tests cover summarizer hallucination, answer faithfulness, and retrieval relevancy — runnable standalone or via pytest.
 
 ---
 
@@ -31,23 +57,24 @@ A research assistant that fetches the latest AI research papers from arXiv, enab
 
 ```
 arxiv-ai-research-tracker/
-├── main.py                    # Entry point — topic selection, ingestion, agent launch
+├── main.py                    # Entry point — calls launch_supervisor()
 ├── agents/
-│   ├── runner.py              # LangGraph StateGraph agent loop
+│   ├── supervisor.py          # Multi-agent supervisor: routes fetch/rag/summarize, supports chaining
+│   ├── runner.py              # Self-RAG LangGraph agent (grade_docs → agent → hallucination_check)
 │   └── tools.py               # search_papers, search_saved_papers, add/delete saved
 ├── ingestion/
-│   └── arxiv_fetcher.py       # arXiv fetching, incremental sync, parallel doc building
+│   └── arxiv_fetcher.py       # arXiv fetching, incremental sync, semantic chunking
 ├── databases/
-│   └── stores.py              # LanceDB stores, LLM singletons, caching, lazy proxies
+│   └── stores.py              # LanceDB stores, hybrid search, LLM singletons, caching
 ├── guardrails/
 │   └── sanitizer.py           # Prompt injection prevention (20+ patterns)
 ├── evaluation/
-│   ├── datasets.py            # Hardcoded test cases (summarizer + RAG)
+│   ├── datasets.py            # Test cases (summarizer + RAG)
 │   ├── run_eval.py            # Standalone eval runner
 │   ├── test_summarizer.py     # pytest — hallucination + summarization metrics
-│   └── test_rag.py            # pytest — faithfulness + contextual relevancy metrics
+│   └── test_rag.py            # pytest — faithfulness + relevancy metrics
 ├── prompts/
-│   └── summarize.txt          # On-demand summarization prompt template
+│   └── summarize.txt          # Summarization prompt template
 └── pyproject.toml             # uv-managed dependencies
 ```
 
@@ -63,32 +90,30 @@ uv sync
 
 ### Environment variables
 
-Create a `.env` file in the project root using `.env.example` file
+Create a `.env` file in the project root using `.env.example` as a reference.
 
 ---
 
-## Execution
-
-### Main app
+## Usage
 
 ```bash
 uv run python main.py
 ```
 
-At startup you will be prompted to select topics:
+The supervisor starts immediately and accepts natural language:
 
 ```
-Available topics:
-  [1] cs.AI — Artificial Intelligence
-  [2] cs.LG — Machine Learning
-  [3] cs.CL — Computation & Language (NLP / LLMs)
-  [4] cs.RO — Robotics
-  [5] All of the above
+[Supervisor Ready] Ask me to fetch papers, search, summarize, or chain tasks.
+Examples:
+  - 'fetch recent robotics papers'
+  - 'find papers on diffusion models'
+  - 'fetch NLP papers then find the best on transformers'
+  - 'summarize recent cs.AI papers'
 
-Enter topic numbers (e.g. 1 3) or press Enter for all:
+You:
 ```
 
-After ingestion the agent starts. Type your question or `exit` to quit.
+Type `exit` or `quit` to stop.
 
 ### Using a local Ollama model for summarization
 
@@ -103,11 +128,11 @@ Ollama is auto-detected at `http://localhost:11434`. If unavailable, the summari
 
 ## Evaluation
 
-### Standalone runner (no pytest, scores printed to terminal)
+### Standalone runner
 
 ```bash
-uv run python -m evaluation.run_eval             # 3 random papers + 3 RAG queries
-uv run python -m evaluation.run_eval --samples 5 # custom paper sample size
+uv run python -m evaluation.run_eval             # default sample size
+uv run python -m evaluation.run_eval --samples 5 # custom sample size
 ```
 
 ### pytest suite
@@ -117,16 +142,6 @@ uv run pytest evaluation/                        # all eval tests
 uv run pytest evaluation/test_summarizer.py      # summarizer only
 uv run pytest evaluation/test_rag.py             # RAG only
 ```
-
-Metrics tested:
-
-| Test | Metric | Threshold |
-|------|--------|-----------|
-| Summarizer | HallucinationMetric | ≤ 0.4 |
-| Summarizer | SummarizationMetric | ≥ 0.4 |
-| RAG | FaithfulnessMetric | ≥ 0.7 |
-| RAG | AnswerRelevancyMetric | ≥ 0.7 |
-| RAG | ContextualRelevancyMetric | ≥ 0.5 |
 
 > **Note:** DeepEval metrics make LLM calls. Ensure `OPENAI_API_KEY` is set before running evals.
 
@@ -142,31 +157,19 @@ Metrics tested:
    LANGCHAIN_API_KEY=your_key_here
    LANGCHAIN_PROJECT=arxiv-tracker
    ```
-4. Run `main.py` — all LLM calls, tool invocations, and agent steps appear automatically in the LangSmith dashboard with no code changes required.
+4. Run `main.py` — all LLM calls, tool invocations, and agent steps appear in the LangSmith dashboard automatically.
 
 ---
 
 ## Security
 
-### Prompt injection prevention (`guardrails/sanitizer.py`)
+All user input and retrieved content passes through `guardrails/sanitizer.py` before reaching the LLM:
 
-All user input and retrieved content passes through a guardrail layer before reaching the LLM:
-
-- **20+ compiled regex patterns** (case-insensitive, Unicode-aware) covering:
-  - Role / identity override (`ignore previous instructions`, `act as`, `pretend you are`, …)
-  - Instruction injection (`new instructions:`, `override prompt`, …)
-  - Structural / delimiter injection (`<system>`, `[INST]`, `|im_start|`, ChatML tags, …)
-  - Jailbreak keywords (`DAN`, `jailbroken`, `developer mode`, `god mode`, …)
-  - Data exfiltration attempts (`reveal your system prompt`, `print your instructions`, …)
-- **NFC Unicode normalization** before matching to defeat lookalike-character bypass attempts
-- **Hard length caps** — queries over 500 chars rejected; retrieved fields truncated at 2 000 chars
-- **Matched content replaced** with `[blocked]` in retrieved text; user queries raise `InputRejected`
-
-### Additional security measures
-
-- **No summary stored in vector DB** — abstracts only; summaries generated on demand, reducing stored LLM output surface
-- **SQL injection prevention** — LanceDB delete uses single-quote escaping (`title.replace("'", "''")`)
-- **Secrets via `.env`** — no API keys hardcoded; `.env` not committed
+- Detects and blocks prompt injection, role overrides, jailbreak keywords, and data exfiltration patterns using 20+ compiled regex rules with Unicode normalization
+- Queries over 500 characters are rejected outright
+- Retrieved fields are truncated and matched content is replaced with `[blocked]`
+- LanceDB deletes use parameterized-style escaping to prevent SQL injection
+- API keys are never hardcoded — loaded from `.env` only
 
 ---
 
@@ -183,8 +186,8 @@ All user input and retrieved content passes through a guardrail layer before rea
 
 ## Future Enhancements
 
+- [ ] Graph RAG — knowledge graph over entities and relationships across papers
 - [ ] Web interface with Streamlit/Gradio
-- [ ] Auto-tag papers ("LLM", "Vision", "RL")
+- [ ] Auto-tag papers by research area ("LLM", "Vision", "RL")
 - [ ] Compare and critique two or more related papers
 - [ ] Email/Slack digest of new papers
-- [ ] Citation graph exploration

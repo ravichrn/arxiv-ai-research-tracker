@@ -10,20 +10,20 @@ Run with:  deepeval test run evaluation/test_rag.py
 
 import pytest
 from deepeval import assert_test
-from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric, ContextualRelevancyMetric
+from deepeval.metrics import AnswerRelevancyMetric, ContextualRelevancyMetric, FaithfulnessMetric
 from deepeval.test_case import LLMTestCase
 
-from databases.stores import papers_store, llm_agent as llm
-from agents.tools import search_papers
+from databases.stores import hybrid_search, papers_store
+from databases.stores import llm_agent as llm
 from evaluation.datasets import RAG_CASES
 
 
 def _retrieve(query: str, k: int = 5) -> list[str]:
-    docs = papers_store.similarity_search(query, k=k)
-    return [
-        f"Title: {d.metadata.get('title')}\n{d.page_content}"
-        for d in docs
-    ]
+    try:
+        docs = hybrid_search(papers_store, query, k=k)
+    except Exception:
+        return []
+    return [f"Title: {d.metadata.get('title')}\n{d.page_content}" for d in docs]
 
 
 def _answer(query: str, context_chunks: list[str]) -> str:

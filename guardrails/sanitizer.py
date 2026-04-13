@@ -40,12 +40,12 @@ _INJECTION_PATTERNS: list[str] = [
     r"\bsystem\s*message\b",
     r"<\s*system\s*>",
     r"\[system\]",
-    r"<\s*/?\s*inst\s*>",        # llama-style <INST> tags
-    r"\|\s*im_start\s*\|",       # chatml delimiters
+    r"<\s*/?\s*inst\s*>",  # llama-style <INST> tags
+    r"\|\s*im_start\s*\|",  # chatml delimiters
     r"\|\s*im_end\s*\|",
     r"<\s*\|?\s*system\s*\|?\s*>",
     # Jailbreak keywords
-    r"\bDAN\b",                  # "Do Anything Now"
+    r"\bDAN\b",  # "Do Anything Now"
     r"do\s+anything\s+now",
     r"jailbroken?\b",
     r"developer\s+mode",
@@ -93,6 +93,7 @@ def sanitize_retrieved(text: str) -> str:
 
 class InputRejected(ValueError):
     """Raised when a user query is rejected by the input guardrail."""
+
     pass
 
 
@@ -107,16 +108,12 @@ def validate_user_input(query: str) -> str:
         raise InputRejected("Query must not be empty.")
 
     if len(query) > _MAX_QUERY_LENGTH:
-        raise InputRejected(
-            f"Query too long ({len(query)} chars). Max is {_MAX_QUERY_LENGTH}."
-        )
+        raise InputRejected(f"Query too long ({len(query)} chars). Max is {_MAX_QUERY_LENGTH}.")
 
     normalized = _normalize(query)
 
     for pattern in _COMPILED:
         if pattern.search(normalized):
-            raise InputRejected(
-                "Query contains a disallowed pattern and was rejected."
-            )
+            raise InputRejected("Query contains a disallowed pattern and was rejected.")
 
     return normalized
