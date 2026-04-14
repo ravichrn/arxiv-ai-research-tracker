@@ -8,31 +8,17 @@ Run with:  deepeval test run evaluation/test_rag.py
        or: pytest evaluation/test_rag.py -v
 """
 
-import os
-
 import pytest
 from deepeval import assert_test
 from deepeval.metrics import AnswerRelevancyMetric, ContextualRelevancyMetric, FaithfulnessMetric
-from deepeval.models import AnthropicModel
 from deepeval.test_case import LLMTestCase
 
 from databases.stores import hybrid_search, papers_store
 from databases.stores import llm_agent as llm
 from evaluation.datasets import ADVERSARIAL_RAG_CASES, RAG_CASES
+from evaluation.judges import make_judge
 
-
-def _make_judge():
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return AnthropicModel(
-            model="claude-opus-4-6",
-            cost_per_input_token=0.000015,
-            cost_per_output_token=0.000075,
-        )
-    fallback = os.getenv("EVAL_JUDGE_MODEL", "gpt-4o")
-    return fallback
-
-
-_JUDGE = _make_judge()
+_JUDGE = make_judge()
 
 
 def _retrieve(query: str, k: int = 5, category: str | None = None) -> list[str]:

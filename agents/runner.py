@@ -33,7 +33,6 @@ from agents.tools import (
     search_saved_papers,
 )
 from databases.stores import llm_agent
-from guardrails.sanitizer import InputRejected, validate_user_input
 
 _MAX_REWRITES = 2
 
@@ -217,18 +216,10 @@ def _route_after_grade_docs(state: AgentState) -> str:
 
 
 def _route_after_hallucination_check(state: AgentState) -> str:
-    # If the last AIMessage ends with the disclaimer, we're done.
-    answer = _get_last_answer(state)
-    if _DISCLAIMER_PREFIX in answer:
-        return END
-    # If max rewrites reached, always end.
     if state.get("rewrite_count", 0) >= _MAX_REWRITES:
         return END
-    # Use the verdict stored by hallucination_check_node — no re-invocation needed.
     verdict = state.get("hallucination_verdict", "YES")
-    if verdict == "NO" and state.get("rewrite_count", 0) < _MAX_REWRITES:
-        return "rewrite_query"
-    return END
+    return "rewrite_query" if verdict == "NO" else END
 
 
 # ---------------------------------------------------------------------------
@@ -260,48 +251,3 @@ def _build_graph():
 
 _graph = _build_graph()
 rag_graph = _graph  # expose for supervisor
-
-
-# ---------------------------------------------------------------------------
-# CLI loop (kept for standalone use; supervisor is the primary entry point)
-# ---------------------------------------------------------------------------
-_MAX_HISTORY_TURNS = 10
-
-
-def launch_agent() -> None:
-    chat_history: list[HumanMessage | AIMessage] = []
-
-    print("\n[Agent Ready] Ask about AI research papers or type 'exit' to quit.\n")
-    while True:
-        query = input("You: ")
-        if query.lower() in ["exit", "quit"]:
-            print("Exiting. Goodbye!")
-            break
-        try:
-            query = validate_user_input(query)
-
-            trimmed = chat_history[-(_MAX_HISTORY_TURNS * 2) :]
-            messages = [_SYSTEM_MESSAGE, *trimmed, HumanMessage(content=query)]
-
-            result = _graph.invoke(
-                {
-                    "messages": messages,
-                    "retrieval_context": [],
-                    "rewrite_count": 0,
-                    "hallucination_verdict": "",
-                }
-            )
-            answer = str(result["messages"][-1].content)
-
-            chat_history.extend([HumanMessage(content=query), AIMessage(content=answer)])
-            if len(chat_history) > _MAX_HISTORY_TURNS * 2:
-                chat_history = chat_history[-(_MAX_HISTORY_TURNS * 2) :]
-            print(f"Agent: {answer}\n")
-
-        except InputRejected as e:
-            print(f"Blocked: {e}\n")
-        except KeyboardInterrupt:
-            print("\nExiting. Goodbye!")
-            break
-        except Exception as e:
-            print(f"Error ({type(e).__name__}): {e}\n")

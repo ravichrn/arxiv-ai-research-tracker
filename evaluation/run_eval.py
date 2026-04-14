@@ -8,40 +8,31 @@ Usage:
 """
 
 import argparse
-import os
 import random
 
 from deepeval.metrics import AnswerRelevancyMetric, FaithfulnessMetric, HallucinationMetric
-from deepeval.models import AnthropicModel
 from deepeval.test_case import LLMTestCase
 
 from databases.stores import hybrid_search, papers_store
 from databases.stores import llm_agent as llm
 from evaluation.datasets import ADVERSARIAL_RAG_CASES, RAG_CASES
+from evaluation.judges import make_judge
 from ingestion.arxiv_fetcher import summarize_text
 
-
-# Cross-provider judge: claude-opus-4-6 via AnthropicModel avoids same-family agreement bias.
-# Falls back to EVAL_JUDGE_MODEL env var (OpenAI string) if ANTHROPIC_API_KEY is not set.
-def _make_judge():
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return AnthropicModel(
-            model="claude-opus-4-6",
-            # Opus 4.6 pricing — cost tracking only, does not affect scoring
-            cost_per_input_token=0.000015,
-            cost_per_output_token=0.000075,
-        )
-    fallback = os.getenv("EVAL_JUDGE_MODEL", "gpt-4o")
-    print(f"[Judge] ANTHROPIC_API_KEY not set — falling back to {fallback}")
-    return fallback
-
-
-_JUDGE = _make_judge()
+_JUDGE = make_judge()
 
 
 def _score(metric, test_case: LLMTestCase) -> tuple[float, bool]:
     metric.measure(test_case)
     return metric.score, metric.success
+
+
+def _retrieve(query: str, k: int = 5, category: str | None = None) -> list:
+    """Hybrid search with category fallback: retry unfiltered if scoped search returns nothing."""
+    docs = hybrid_search(papers_store, query, k=k, category_filter=category)
+    if not docs and category:
+        docs = hybrid_search(papers_store, query, k=k)
+    return docs
 
 
 def _answer(query: str, context: list[str]) -> str:
@@ -106,9 +97,7 @@ def run_rag_eval() -> None:
     relevancy = AnswerRelevancyMetric(threshold=0.7, model=_JUDGE, async_mode=False)
 
     for case in RAG_CASES:
-        retrieved = hybrid_search(papers_store, case.query, k=5, category_filter=case.category)
-        if not retrieved and case.category:
-            retrieved = hybrid_search(papers_store, case.query, k=5)
+        retrieved = _retrieve(case.query, category=case.category)
         if not retrieved:
             print(f"  [SKIP] No results for: {case.query}")
             continue
@@ -153,9 +142,7 @@ def run_adversarial_eval() -> None:
     for case in ADVERSARIAL_RAG_CASES:
         # Force category-scoped retrieval — if category has no papers, fall back to unfiltered.
         # Either way, context is intentionally mismatched to the query.
-        retrieved = hybrid_search(papers_store, case.query, k=5, category_filter=case.category)
-        if not retrieved:
-            retrieved = hybrid_search(papers_store, case.query, k=5)
+        retrieved = _retrieve(case.query, category=case.category)
         if not retrieved:
             print(f"  [SKIP] No results for: {case.query}")
             continue

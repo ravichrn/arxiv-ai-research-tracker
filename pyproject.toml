@@ -27,7 +27,9 @@ dependencies = [
     "lancedb",
     "arxiv",
     "python-dotenv",
-    # Tracing — LangSmith (env vars only, no code needed)
+    # Reranking — cross-encoder for hybrid search precision
+    "sentence-transformers",
+    # Tracing — LangSmith traces activated by LANGCHAIN_TRACING_V2=true + LANGCHAIN_API_KEY
     "langsmith",
     # Utilities
     "numpy",
@@ -37,6 +39,7 @@ dependencies = [
     "tqdm",
     "pydantic",
     "typing-extensions",
+    "langgraph-checkpoint-sqlite>=3.0.3",
 ]
 
 [project.scripts]
