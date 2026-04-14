@@ -135,35 +135,16 @@ def _arxiv_id(result: arxiv.Result) -> str:
 
 def get_paper_by_title(title: str) -> dict | None:
     """Look up a paper from papers_raw.jsonl by exact title (case-insensitive)."""
-    if not _RAW_PAPERS_FILE.exists():
-        return None
     title_lower = title.lower().strip()
-    for line in _RAW_PAPERS_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            paper = json.loads(line)
-            if paper.get("title", "").lower().strip() == title_lower:
-                return paper
-        except (json.JSONDecodeError, KeyError):
-            pass
+    for paper in _load_papers_cache():
+        if paper.get("title", "").lower().strip() == title_lower:
+            return paper
     return None
 
 
 def list_papers() -> str:
     """Return a formatted list of all saved papers with arXiv IDs and titles."""
-    if not _RAW_PAPERS_FILE.exists():
-        return "No papers saved yet. Run a fetch first."
-    papers = []
-    for line in _RAW_PAPERS_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            papers.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
+    papers = _load_papers_cache()
     if not papers:
         return "No papers saved yet. Run a fetch first."
     lines = [f"Saved papers ({len(papers)} total):\n"]
@@ -180,20 +161,11 @@ def get_paper_by_arxiv_id(arxiv_id: str) -> dict | None:
     Matches on both versioned ('2301.12345v2') and base ('2301.12345') forms.
     Returns the raw paper dict, or None if not found.
     """
-    if not _RAW_PAPERS_FILE.exists():
-        return None
     base_id = arxiv_id.split("v")[0]
-    for line in _RAW_PAPERS_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            paper = json.loads(line)
-            url = paper.get("arxiv_id", "") or paper.get("url", "")
-            if arxiv_id in url or base_id in url:
-                return paper
-        except (json.JSONDecodeError, KeyError):
-            pass
+    for paper in _load_papers_cache():
+        url = paper.get("arxiv_id", "") or paper.get("url", "")
+        if arxiv_id in url or base_id in url:
+            return paper
     return None
 
 
@@ -213,51 +185,41 @@ def _print_paper(result: arxiv.Result) -> None:
 _splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=100)
 
 
-def _build_docs(result: arxiv.Result) -> list[Document]:
-    """Split an arXiv abstract into chunks and return one Document per chunk.
-
-    Each chunk inherits the paper's metadata plus chunk-level fields so that
-    retrieval results can be deduplicated back to paper level.
-    """
-    base_meta = {
-        "title": result.title,
-        "authors": ", ".join(a.name for a in result.authors),
-        "url": result.entry_id,
-        "categories": ", ".join(result.categories),
-        "published": result.published.isoformat(),
-    }
-
-    chunks = _splitter.split_text(result.summary)
-    return [
-        Document(
-            page_content=chunk_text,
-            metadata={
-                **base_meta,
-                "chunk_id": f"{result.entry_id}#{i}",
-                "chunk_index": i,
-                "total_chunks": len(chunks),
-            },
-        )
-        for i, chunk_text in enumerate(chunks)
-    ]
-
-
 _RAW_PAPERS_FILE = Path(__file__).parent.parent / "databases" / "papers_raw.jsonl"
 
+# Module-level cache for papers_raw.jsonl — avoids re-reading the file on every
+# get_paper_by_title / get_paper_by_arxiv_id / list_papers call within a session.
+# Invalidated after every write in fetch_papers so new papers are visible immediately.
+_papers_cache: list[dict] | None = None
 
-def _load_raw_urls() -> set[str]:
-    """Return the set of URLs already saved in papers_raw.jsonl."""
+
+def _load_papers_cache() -> list[dict]:
+    global _papers_cache
+    if _papers_cache is not None:
+        return _papers_cache
     if not _RAW_PAPERS_FILE.exists():
-        return set()
-    urls = set()
+        _papers_cache = []
+        return _papers_cache
+    papers = []
     for line in _RAW_PAPERS_FILE.read_text().splitlines():
         line = line.strip()
         if line:
             try:
-                urls.add(json.loads(line)["url"])
-            except (json.JSONDecodeError, KeyError):
+                papers.append(json.loads(line))
+            except json.JSONDecodeError:
                 pass
-    return urls
+    _papers_cache = papers
+    return _papers_cache
+
+
+def _invalidate_papers_cache() -> None:
+    global _papers_cache
+    _papers_cache = None
+
+
+def _load_raw_urls() -> set[str]:
+    """Return the set of URLs already saved in papers_raw.jsonl."""
+    return {p["url"] for p in _load_papers_cache() if p.get("url")}
 
 
 def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> int:
@@ -327,6 +289,7 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
                 print(f"\n[{topic}] {topic_count} new papers saved.")
             new_count += topic_count
 
+    _invalidate_papers_cache()
     _save_last_run(topics, fetched_all)
     print(f"\n{'=' * 70}")
     print(f"Total: {new_count} new papers fetched.")
@@ -364,8 +327,3 @@ def _embed_and_store(papers: list[dict]) -> int:
     papers_store.add_documents(docs)
     print(f"Indexed {len(papers)} papers ({len(docs)} chunks) into vector store.")
     return len(papers)
-
-
-def fetch_and_summarize_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> None:
-    """Fetch and index papers. Kept for backwards compatibility."""
-    fetch_papers(max_per_topic=max_per_topic, topics=topics)

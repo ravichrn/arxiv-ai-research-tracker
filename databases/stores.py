@@ -159,17 +159,61 @@ papers_store = _LazyProxy(_make_papers_store)
 saved_store = _LazyProxy(_make_saved_store)
 
 
-def hybrid_search(store, query: str, k: int = 5, category_filter: str | None = None) -> list:
-    """Hybrid vector + full-text search with chunk deduplication.
+# ---------------------------------------------------------------------------
+# Cross-encoder reranker — lazy singleton, loads on first use.
+# Model: ms-marco-MiniLM-L-6-v2 (~23 MB, CPU-only, no API key needed).
+# Reranks (query, doc) pairs jointly — more accurate than bi-encoder similarity.
+# ---------------------------------------------------------------------------
+_reranker = None
+_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+
+def _get_reranker():
+    global _reranker
+    if _reranker is None:
+        from sentence_transformers import CrossEncoder
+
+        _reranker = CrossEncoder(_RERANKER_MODEL, max_length=512)
+    return _reranker
+
+
+def _rerank(query: str, docs: list) -> list:
+    """Rerank docs by cross-encoder (query, doc) score descending.
+
+    Falls back to original order if the model fails to load or score.
+    """
+    if not docs:
+        return docs
+    try:
+        reranker = _get_reranker()
+        pairs = [(query, doc.page_content) for doc in docs]
+        scores = reranker.predict(pairs)
+        ranked = sorted(zip(scores, docs, strict=True), key=lambda x: x[0], reverse=True)
+        return [doc for _, doc in ranked]
+    except Exception as e:
+        print(f"[Reranker] skipped: {e}")
+        return docs
+
+
+def hybrid_search(
+    store,
+    query: str,
+    k: int = 5,
+    category_filter: str | None = None,
+    rerank: bool = True,
+) -> list:
+    """Hybrid vector + full-text search with chunk deduplication and optional reranking.
 
     Retrieves up to k*3 candidate chunks via hybrid search (dense + BM25),
-    then deduplicates to return at most *k* unique papers (one best chunk each).
+    deduplicates to at most *k* unique papers (one best chunk each), then
+    reranks with a cross-encoder for higher precision.
 
     Falls back to pure vector search if the FTS index is not yet built.
 
     Args:
         category_filter: Optional arXiv category code (e.g. "cs.RO") to restrict
                          results to papers whose ``categories`` field contains it.
+        rerank: If True (default), rerank deduplicated results with a cross-encoder.
     """
     _ensure_fts_index(store)
     # LangChain's LanceDB integration stores metadata as a Struct column with named
@@ -190,7 +234,10 @@ def hybrid_search(store, query: str, k: int = 5, category_filter: str | None = N
         if len(seen) >= k:
             break
 
-    return list(seen.values())
+    result = list(seen.values())
+    if rerank and result:
+        result = _rerank(query, result)
+    return result
 
 
 # ---------------------------------------------------------------------------

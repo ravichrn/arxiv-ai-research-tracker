@@ -15,7 +15,7 @@ def _format_docs(docs) -> str:
             f"Authors  : {sanitize_retrieved(str(meta.get('authors', '')))}\n"
             f"Topics   : {meta.get('categories', 'N/A')}\n"
             f"Published: {meta.get('published', 'N/A')}\n"
-            f"URL      : {meta.get('url')}\n"
+            f"URL      : {sanitize_retrieved(str(meta.get('url', '')))}\n"
             f"\nAbstract : {sanitize_retrieved(str(doc.page_content))}"
         )
     return "\n\n".join(results)
@@ -46,7 +46,7 @@ def add_paper_to_saved(title: str) -> str:
 @tool
 def delete_paper_from_saved(title: str) -> str:
     """Delete a paper from the saved papers collection by title."""
-    docs = saved_store.similarity_search(title, k=1)
+    docs = hybrid_search(saved_store, title, k=1)
     if docs:
         matched_title = docs[0].metadata.get("title", "")
         # Delete by URL — arXiv URLs are alphanumeric+punctuation, no quotes,

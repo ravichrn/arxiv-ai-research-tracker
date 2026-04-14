@@ -22,9 +22,11 @@ Sub-agents:
 
 import json
 import re as _re
+from pathlib import Path
 from typing import Annotated
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
@@ -42,7 +44,6 @@ from ingestion.arxiv_fetcher import (
 )
 
 _MAX_CHAIN_STEPS = 3
-_MAX_HISTORY_TURNS = 10
 
 _TOPIC_ALIASES: dict[str, str] = {
     "ai": "cs.AI",
@@ -143,6 +144,7 @@ def _parse_route(raw: str) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        print(f"  [Supervisor] WARNING: LLM returned malformed routing JSON — {raw[:120]!r}")
         return {"steps": [], "topics": [], "rag_query": ""}
 
 
@@ -246,6 +248,9 @@ def rag_node(state: SupervisorState) -> dict:
         }
     )
     answer = str(result["messages"][-1].content)
+    citations = _format_citations(result.get("retrieval_context", []))
+    if citations:
+        answer = f"{answer}\n\nSources:\n{citations}"
     return {"last_result": answer, "messages": [AIMessage(content=answer)]}
 
 
@@ -318,6 +323,31 @@ def _dispatch_intent(state: SupervisorState) -> str:
     return "clarify"
 
 
+def _format_citations(context: list[str]) -> str:
+    """Parse title + arxiv ID from retrieval_context blocks and format as a Sources list.
+
+    Each block in retrieval_context is a formatted string from _format_docs:
+        Title    : <title>
+        ...
+        URL      : https://arxiv.org/abs/<arxiv_id>
+    """
+    citations: list[str] = []
+    for block in context:
+        title_match = _re.search(r"Title\s*:\s*(.+)", block)
+        url_match = _re.search(r"URL\s*:\s*(https?://\S+)", block)
+        if not title_match:
+            continue
+        title = title_match.group(1).strip()
+        arxiv_id = ""
+        if url_match:
+            id_match = _re.search(r"/abs/(\S+)", url_match.group(1))
+            if id_match:
+                arxiv_id = id_match.group(1)
+        line = f"  [{arxiv_id}] {title}" if arxiv_id else f"  {title}"
+        citations.append(line)
+    return "\n".join(dict.fromkeys(citations))
+
+
 def _route_after_capability(state: SupervisorState) -> str:
     """After a capability node: continue chain or finalize."""
     pending = state.get("pending_chain", [])
@@ -329,7 +359,7 @@ def _route_after_capability(state: SupervisorState) -> str:
 # ---------------------------------------------------------------------------
 # Graph definition
 # ---------------------------------------------------------------------------
-def _build_supervisor_graph():
+def _build_supervisor_graph(checkpointer=None):
     graph = StateGraph(SupervisorState)
 
     graph.add_node("route", route_node)
@@ -351,42 +381,62 @@ def _build_supervisor_graph():
 
     graph.add_edge("finalize", END)
 
-    return graph.compile()
-
-
-_supervisor_graph = _build_supervisor_graph()
+    return graph.compile(checkpointer=checkpointer)
 
 
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
-def launch_supervisor() -> None:
-    chat_history: list[HumanMessage | AIMessage] = []
 
+# Nodes whose LLM calls produce token-level output worth streaming to the user.
+# (rag_node invokes a sub-graph — its tokens don't surface here; ingestion/list
+# return brief status strings, not long LLM-generated text.)
+_STREAMING_NODES = {"summarize", "clarify"}
+
+_DB_DIR = Path(__file__).parent.parent / "databases"
+
+
+def launch_supervisor() -> None:
     print("\n[Supervisor Ready] Ask me to fetch papers, index, search, summarize, or chain tasks.")
     print("Examples:")
-    print("  - 'fetch recent robotics papers'          (fast — no embedding)")
-    print("  - 'index papers'                          (embed fetched papers for search)")
+    print("  - 'fetch recent robotics papers'")
     print("  - 'find papers on diffusion models'")
-    print("  - 'fetch NLP papers then index then find the best on transformers'")
-    print("  - 'summarize recent cs.AI papers'\n")
+    print("  - 'fetch NLP papers then find the best on transformers'")
+    print("  - 'summarize recent cs.AI papers'")
+    print("  - Type 'new session' to start a fresh conversation\n")
 
-    while True:
-        query = input("You: ").strip()
-        if not query:
-            continue
-        if query.lower() in ("exit", "quit"):
-            print("Exiting. Goodbye!")
-            break
-        try:
-            query = validate_user_input(query)
+    with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
+        graph = _build_supervisor_graph(checkpointer)
+        config: dict = {"configurable": {"thread_id": "default"}}
 
-            trimmed = chat_history[-(_MAX_HISTORY_TURNS * 2) :]
-            messages = [_SYSTEM_MESSAGE, *trimmed, HumanMessage(content=query)]
+        while True:
+            query = input("You: ").strip()
+            if not query:
+                continue
+            if query.lower() in ("exit", "quit"):
+                print("Exiting. Goodbye!")
+                break
+            if query.lower() in ("new session", "reset"):
+                config = {"configurable": {"thread_id": _new_thread_id()}}
+                print("  [Supervisor] Started a new session.\n")
+                continue
 
-            result = _supervisor_graph.invoke(
-                {
-                    "messages": messages,
+            try:
+                query = validate_user_input(query)
+
+                # Include the system message only on the first turn for a thread.
+                # The checkpointer accumulates messages across turns; subsequent
+                # turns just append the new HumanMessage.
+                checkpoint = checkpointer.get(config)
+                has_history = checkpoint is not None
+                initial_msgs = (
+                    [HumanMessage(content=query)]
+                    if has_history
+                    else [_SYSTEM_MESSAGE, HumanMessage(content=query)]
+                )
+
+                initial_state = {
+                    "messages": initial_msgs,
                     "intent": "",
                     "resolved_topics": [],
                     "pending_chain": [],
@@ -394,18 +444,45 @@ def launch_supervisor() -> None:
                     "last_result": "",
                     "pinned_paper": "",
                 }
-            )
-            answer = result.get("last_result") or str(result["messages"][-1].content)
 
-            chat_history.extend([HumanMessage(content=query), AIMessage(content=answer)])
-            if len(chat_history) > _MAX_HISTORY_TURNS * 2:
-                chat_history = chat_history[-(_MAX_HISTORY_TURNS * 2) :]
-            print(f"\nAgent: {answer}\n")
+                # Stream both state snapshots (values) and LLM token chunks (messages).
+                # tokens from summarize/clarify nodes are printed inline as they arrive;
+                # results from rag/ingestion/list are printed after the stream ends.
+                streamed_nodes: set[str] = set()
+                final_result = ""
 
-        except InputRejected as e:
-            print(f"Blocked: {e}\n")
-        except KeyboardInterrupt:
-            print("\nExiting. Goodbye!")
-            break
-        except Exception as e:
-            print(f"Error ({type(e).__name__}): {e}\n")
+                for event_type, event_data in graph.stream(
+                    initial_state, config=config, stream_mode=["values", "messages"]
+                ):
+                    if event_type == "messages":
+                        chunk, meta = event_data
+                        node = meta.get("langgraph_node", "")
+                        if node in _STREAMING_NODES and hasattr(chunk, "content") and chunk.content:
+                            if node not in streamed_nodes:
+                                print("\nAgent: ", end="", flush=True)
+                                streamed_nodes.add(node)
+                            print(chunk.content, end="", flush=True)
+                    elif event_type == "values":
+                        r = event_data.get("last_result", "")
+                        if r:
+                            final_result = r
+
+                if streamed_nodes:
+                    print("\n")  # close inline token output
+                elif final_result:
+                    print(f"\nAgent: {final_result}\n")
+
+            except InputRejected as e:
+                print(f"Blocked: {e}\n")
+            except KeyboardInterrupt:
+                print("\nExiting. Goodbye!")
+                break
+            except Exception as e:
+                print(f"Error ({type(e).__name__}): {e}\n")
+
+
+def _new_thread_id() -> str:
+    """Generate a unique thread ID for a fresh session."""
+    import time
+
+    return f"session-{int(time.time())}"

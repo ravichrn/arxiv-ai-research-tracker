@@ -25,10 +25,23 @@ The Q&A sub-agent doesn't just retrieve and respond — it actively verifies the
 2. **Query rewriting** — if retrieval quality is poor, the agent automatically reformulates the query and retries (up to 2 times)
 3. **Hallucination checking** — the generated answer is checked against the retrieved context; if it's not grounded, the agent rewrites and retries before delivering a response with a disclaimer
 
-### Hybrid Search
+### Hybrid Search + Cross-Encoder Reranking
 Retrieval combines dense vector similarity (OpenAI embeddings) with BM25 full-text search using LanceDB's hybrid query mode. Results are fused and deduplicated at the paper level, so you get the best chunk per paper rather than repeated chunks from the same abstract.
 
+After deduplication, a **cross-encoder** (`cross-encoder/ms-marco-MiniLM-L-6-v2`) reranks the candidates by scoring each (query, document) pair jointly — far more accurate than bi-encoder similarity for final selection. The model is ~23 MB, runs CPU-only, and is loaded lazily on first use. Pass `rerank=False` to `hybrid_search()` to skip reranking when order doesn't matter (e.g. batch summarization).
+
 An optional `category_filter` parameter (e.g. `"cs.RO"`) can scope retrieval to a specific arXiv category — used by the evaluation suite to avoid cross-topic dilution when scoring retrieval precision for topic-specific queries.
+
+### Source Citations
+RAG answers automatically include a **Sources** block listing the arxiv IDs and titles of every paper the answer drew from, e.g.:
+
+```
+Sources:
+  [2301.12345v2] Attention Is All You Need
+  [2504.08123v1] Scaling Laws for Neural Language Models
+```
+
+Citations are parsed from the `retrieval_context` state by `_format_citations()` in `agents/supervisor.py` and appended only when the Self-RAG agent actually retrieved and graded relevant documents.
 
 ### Fast Chunking
 Paper abstracts are split using `RecursiveCharacterTextSplitter` with a 2000-character limit. arXiv abstracts are typically 150–300 words, so almost every abstract is stored as a single chunk — no unnecessary splitting. A character-based splitter is used deliberately: the previous semantic chunker embedded every sentence per abstract to find split boundaries, adding ~150–300 uncached API calls per 20-paper fetch with no retrieval benefit for short texts.
@@ -51,6 +64,12 @@ LLM responses, embeddings, and Anthropic prompt prefixes are all cached to minim
 - **Summarizer** — uses a local Ollama model (llama3.2) if available, falls back to OpenAI gpt-4o-mini
 - **Agent** — OpenAI gpt-4o by default; switch to Anthropic Claude by setting `AGENT_LLM=claude`
 
+### Streaming Output
+The supervisor streams LLM tokens directly to the terminal for long-running nodes. `summarize` and `clarify` node responses appear word-by-word as the model generates them — no waiting for the full response. For `rag`, `ingestion`, and `list` nodes, the result is printed after the agent completes. This uses LangGraph's `stream_mode=["values", "messages"]` API.
+
+### Persistent Conversation Memory
+Conversation state is checkpointed to `databases/agent_memory.db` via LangGraph's `SqliteSaver`. Each session continues from where the previous one left off — the agent remembers prior queries, fetched topics, and context across program restarts. Type `new session` or `reset` at any prompt to start a fresh conversation thread.
+
 ### Guardrails
 All user input and retrieved content passes through a sanitization layer before reaching the LLM. It detects and blocks prompt injection attempts, jailbreak patterns, role overrides, and data exfiltration requests using compiled regex patterns with Unicode normalization.
 
@@ -62,7 +81,15 @@ DeepEval-based evaluation with four suites — runnable standalone or via pytest
 - **No-context baseline** — same RAG queries answered without retrieval, to quantify what the pipeline adds over raw LLM knowledge
 - **Summarizer eval** (6 cases) — hallucination and coverage checks on known paper abstracts
 
-**Judge model:** `claude-opus-4-6` via DeepEval's `AnthropicModel` (cross-provider judging — avoids same-family agreement bias between the answering model and judge). Falls back to `EVAL_JUDGE_MODEL` in `.env` if `ANTHROPIC_API_KEY` is not set.
+**Tiered judge model** — set `EVAL_JUDGE` in `.env`:
+
+| `EVAL_JUDGE` | Judge | Cost | When to use |
+|---|---|---|---|
+| `prometheus` | Prometheus 2 via Ollama | Free (local) | Daily iteration — fine-tuned for faithfulness/hallucination |
+| `claude` | `claude-opus-4-6` via Anthropic | ~$6–10/run | Final portfolio eval — cross-provider, most credible |
+| `openai` | `EVAL_JUDGE_MODEL` (default `gpt-4o`) | ~$1–2/run | Fallback when no Anthropic key |
+
+Auto-selects `claude` if `ANTHROPIC_API_KEY` is set, otherwise `openai`. Prometheus 2 requires a one-time `ollama pull vicgalle/prometheus-7b-v2.0` (~4.4 GB).
 
 ---
 
@@ -162,7 +189,7 @@ uv run pytest evaluation/test_summarizer.py      # summarizer only
 uv run pytest evaluation/test_rag.py             # RAG only
 ```
 
-> **Note:** DeepEval metrics make LLM calls. Set `ANTHROPIC_API_KEY` to use `claude-opus-4-6` as the judge (recommended). If unset, the judge falls back to `EVAL_JUDGE_MODEL` in `.env` (defaults to `gpt-4o`).
+> **Note:** DeepEval metrics make LLM calls. Set `EVAL_JUDGE=prometheus` in `.env` for free local judging via Ollama (requires `ollama pull vicgalle/prometheus-7b-v2.0`). Set `EVAL_JUDGE=claude` with `ANTHROPIC_API_KEY` for final cross-provider evaluation. See `EVAL_JUDGE` in `.env.example` for all options.
 
 ---
 
@@ -174,8 +201,8 @@ uv run pytest evaluation/test_rag.py             # RAG only
    ```env
    LANGCHAIN_TRACING_V2=true
    LANGCHAIN_API_KEY=your_key_here
-   LANGCHAIN_PROJECT=arxiv-tracker
    ```
+   The project name is pre-set to `arxiv-ai-research-tracker` in `main.py` via `os.environ.setdefault`.
 4. Run `main.py` — all LLM calls, tool invocations, and agent steps appear in the LangSmith dashboard automatically.
 
 ---
