@@ -33,7 +33,15 @@ from typing_extensions import TypedDict
 
 from agents.runner import rag_graph
 from agents.tools import _format_docs
-from databases.stores import hybrid_search, llm_agent, papers_store
+from databases.export_utils import render_bibtex, render_csv
+from databases.interest_rerank import interest_aware_rerank
+from databases.saved_metadata import (
+    get_tags_and_note_for_title,
+    set_note,
+    set_tags,
+)
+from databases.stores import hybrid_search, llm_agent, papers_store, saved_store
+from databases.trends_utils import compute_category_trends, render_trends_report
 from guardrails.sanitizer import InputRejected, validate_user_input
 from ingestion.arxiv_fetcher import (
     TOPICS,
@@ -71,7 +79,9 @@ _SYSTEM_MESSAGE = SystemMessage(
         "summarize (batch summary), compare (side-by-side comparison), "
         "tag (cluster papers by research theme), digest (recent papers digest), "
         "diagram (Mermaid flowchart of a paper's methodology), "
-        "figures (extract real images/figures from a paper)."
+        "figures (extract real images/figures from a paper), "
+        "export (export saved/paper metadata), explain (justify sources used), "
+        "saved_tags (store user tags/notes for papers), trends (what's changing recently)."
     )
 )
 
@@ -80,9 +90,9 @@ You are a routing assistant for an AI research paper tool.
 
 Given the user request, respond with a JSON object only (no markdown, no explanation):
 {{
-  "steps": [...],      // ordered list: fetch|list|rag|summarize|compare|tag|digest|diagram|figures
+  "steps": [...],      // ordered list of capability names
   "topics": [...],     // arXiv topic codes needed for fetch: cs.AI, cs.LG, cs.CL, cs.RO
-  "rag_query": "..."   // refined query for rag/summarize/tag/diagram (empty string if not needed)
+  "rag_query": "..."   // refined query (empty if not needed)
 }}
 
 Rules:
@@ -95,6 +105,10 @@ Rules:
 - Use "digest" when the user wants a digest or overview of recent papers (e.g. "daily digest").
 - Use "diagram" when the user wants a visual diagram or flowchart of a paper's methodology.
 - Use "figures" when the user wants actual images/figures from the paper (not a generated diagram).
+- Use "export" when the user wants to export paper metadata.
+- Use "explain" when the user asks why these sources were used.
+- Use "saved_tags" when the user wants to save tags/notes or view stored tags/notes.
+- Use "trends" when the user asks what is changing over the last N days.
 - Multi-step requests get multiple entries in "steps" (max {max_steps}).
 - If topics are not mentioned for a fetch, return an empty list (means fetch all).
 - If the request is unclear or unrelated, return {{"steps": [], "topics": [], "rag_query": ""}}.
@@ -108,11 +122,12 @@ User request: {query}
 # ---------------------------------------------------------------------------
 class SupervisorState(TypedDict):
     messages: Annotated[list, add_messages]
-    intent: str  # "fetch" | "rag" | "summarize" | "compare" | "list" | "unknown"
+    intent: str  # capability name
     resolved_topics: list[str]  # parsed arXiv topic codes for fetch
     pending_chain: list[str]  # remaining steps in a multi-step request
     rag_query: str  # refined query for rag/summarize nodes
     last_result: str  # output from the last completed sub-agent
+    last_retrieval_context: list[str]  # retrieved doc blocks used by the last rag_node call
     pinned_paper: str  # title of a specific paper pinned via #arxiv_id (empty = no pin)
     pinned_papers: list[str]  # all titles pinned via #arxiv_id refs (used by compare_node)
 
@@ -248,6 +263,74 @@ def list_node(state: SupervisorState) -> dict:
     return {"last_result": result, "messages": [AIMessage(content=result)]}
 
 
+def export_node(state: SupervisorState) -> dict:
+    """Export saved papers or a pinned paper in deterministic formats (no LLM)."""
+    query = _last_human_content(state)
+    q_lower = query.lower()
+
+    fmt = (
+        "bibtex"
+        if "bibtex" in q_lower or "--bibtex" in q_lower or " bib " in (" " + q_lower + " ")
+        else "csv"
+    )
+
+    # Scope selection: prefer pinned titles if provided.
+    pinned_one = state.get("pinned_paper", "") or ""
+    pinned_many = state.get("pinned_papers", []) or []
+
+    papers: list[dict] = []
+    if pinned_one:
+        paper = get_paper_by_title(pinned_one)
+        if paper:
+            papers.append(paper)
+    elif pinned_many:
+        for title in pinned_many:
+            paper = get_paper_by_title(title)
+            if paper:
+                papers.append(paper)
+
+    # "export saved" fallback
+    if not papers or "saved" in q_lower:
+        rows = (
+            saved_store.get_table()
+            .search()
+            .select(["url", "arxiv_id", "title", "authors", "categories", "published"])
+            .to_list()
+        )
+        seen_urls: set[str] = set()
+        for r in rows:
+            url = str(r.get("url", "")).strip()
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+
+            paper = {
+                "arxiv_id": str(r.get("arxiv_id", "")).strip(),
+                "url": url,
+                "title": str(r.get("title", "")).strip(),
+                "authors": str(r.get("authors", "")).strip(),
+                "categories": str(r.get("categories", "")).strip(),
+                "published": str(r.get("published", "")).strip(),
+            }
+            if paper["title"]:
+                papers.append(paper)
+
+    if not papers:
+        result = (
+            "No papers found to export. Try `fetch` first, then `export saved`, "
+            "or reference a paper like `export #2301.12345v2`."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    if fmt == "bibtex":
+        result = render_bibtex(papers)
+    else:
+        result = render_csv(papers)
+
+    return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+
 def rag_node(state: SupervisorState) -> dict:
     """Delegate to the Self-RAG sub-agent for paper Q&A."""
     query = state.get("rag_query") or _last_human_content(state)
@@ -264,7 +347,127 @@ def rag_node(state: SupervisorState) -> dict:
     citations = _format_citations(result.get("retrieval_context", []))
     if citations:
         answer = f"{answer}\n\nSources:\n{citations}"
-    return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+    return {
+        "last_result": answer,
+        "messages": [AIMessage(content=answer)],
+        "last_retrieval_context": result.get("retrieval_context", []),
+    }
+
+
+def explain_node(state: SupervisorState) -> dict:
+    """Explain what sources were used for the last RAG answer (no LLM)."""
+    retrieval_context = state.get("last_retrieval_context", []) or []
+    if not retrieval_context:
+        result = (
+            "No retrieval context found yet. Run a search/RAG first "
+            "(e.g. `find papers on ...`) and then ask me to explain."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    def _parse_block(block: str) -> tuple[str, str, str]:
+        title_match = _re.search(r"Title\s*:\s*(.+)", block)
+        url_match = _re.search(r"URL\s*:\s*(https?://\S+)", block)
+        abstract_match = _re.search(r"Abstract\s*:\s*(.+)", block)
+        title = title_match.group(1).strip() if title_match else ""
+        url = url_match.group(1).strip() if url_match else ""
+        abstract = abstract_match.group(1).strip() if abstract_match else ""
+        return title, url, abstract
+
+    lines: list[str] = ["Sources used:"]
+    for i, block in enumerate(retrieval_context[:6], 1):
+        title, url, abstract = _parse_block(str(block))
+        snippet = abstract[:180] + ("…" if len(abstract) > 180 else "")
+        if title and url:
+            lines.append(f"{i}. {title} ({url})")
+        elif title:
+            lines.append(f"{i}. {title}")
+        if snippet:
+            lines.append(f"   - {snippet}")
+
+    result = "\n".join(lines)
+    return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+
+def saved_tags_node(state: SupervisorState) -> dict:
+    """Store or display tags/notes for a pinned paper (SQLite; no LLM)."""
+    query = _last_human_content(state)
+    q_lower = query.lower()
+
+    pinned = state.get("pinned_paper", "") or ""
+    if not pinned:
+        result = (
+            "To manage tags/notes, reference a paper first, e.g. "
+            "`save tag #2301.12345 transformers` or `note #2301.12345 ...`."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    # Remove one arXiv token to make parsing after the keyword easier.
+    q_no_id = _re.sub(r"#(\d{4}\.\d{4,5}(?:v\d+)?)", "", query, count=1).strip()
+    q_no_id_lower = q_no_id.lower()
+
+    show_tags = "show tags" in q_lower or "list tags" in q_lower or "show tag" in q_lower
+    show_note = "show note" in q_lower or "list note" in q_lower or "show notes" in q_lower
+
+    def _extract_after_keyword(keyword: str) -> str:
+        lower = q_no_id_lower
+        idx = lower.find(keyword)
+        if idx == -1:
+            return ""
+        return q_no_id[idx + len(keyword) :].strip(" :,-\n\t")
+
+    if show_tags:
+        tags, note = get_tags_and_note_for_title(pinned)
+        if not tags and not note:
+            result = f"No tags/notes stored yet for: {pinned}"
+        else:
+            lines = [f"Tags/notes for: {pinned}"]
+            if tags:
+                lines.append("Tags: " + ", ".join(tags))
+            if note:
+                lines.append("Note: " + note)
+            result = "\n".join(lines)
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    if show_note:
+        _, note = get_tags_and_note_for_title(pinned)
+        result = note.strip() if note.strip() else f"No note stored for: {pinned}"
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    # Save modes
+    if "notes" in q_no_id_lower or "note" in q_no_id_lower:
+        keyword = "notes" if "notes" in q_no_id_lower else "note"
+        note_text = _extract_after_keyword(keyword)
+        if not note_text:
+            result = "Please provide note text, e.g. `save note #2301.12345 ...`"
+            return {"last_result": result, "messages": [AIMessage(content=result)]}
+        set_note(pinned, note_text)
+        result = f"Saved note for: {pinned}"
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    if "tags" in q_no_id_lower or "tag" in q_no_id_lower:
+        keyword = "tags" if "tags" in q_no_id_lower else "tag"
+        tags_text = _extract_after_keyword(keyword)
+        if not tags_text:
+            result = "Please provide tag text, e.g. `save tag #2301.12345 transformers`"
+            return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+        # Split on common separators and normalize.
+        parts = _re.split(r"[;,]|\\band\\b", tags_text, flags=_re.IGNORECASE)
+        tags = [p.strip().lower() for p in parts if p and p.strip()]
+
+        if not tags:
+            result = f"No valid tags found in: {tags_text!r}"
+            return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+        set_tags(pinned, tags)
+        result = f"Saved {len(tags)} tag(s) for: {pinned}"
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    result = (
+        "Could not determine whether you wanted to save or view tags/notes. "
+        "Try `show tags`, `save tag ...`, or `save note ...`."
+    )
+    return {"last_result": result, "messages": [AIMessage(content=result)]}
 
 
 def summarize_node(state: SupervisorState) -> dict:
@@ -296,6 +499,7 @@ def summarize_node(state: SupervisorState) -> dict:
 
     print(f"  [Supervisor] Summarizing papers for: {query}")
     docs = hybrid_search(papers_store, query, k=5)
+    docs = interest_aware_rerank(query, docs)
     formatted = _format_docs(docs)
     prompt = (
         "You are a research assistant. Summarize the following papers for a researcher "
@@ -568,6 +772,33 @@ def digest_node(state: SupervisorState) -> dict:
     return {"last_result": answer, "messages": [AIMessage(content=answer)]}
 
 
+def trends_node(state: SupervisorState) -> dict:
+    """No-LLM trend analysis: rising arXiv categories over recent time windows."""
+    query = state.get("rag_query") or _last_human_content(state)
+
+    days = 14
+    for token in query.split():
+        if token.isdigit():
+            days = max(1, min(int(token), 90))
+            break
+
+    # Fetch enough papers to cover both windows: [now-2N, now-N) and [now-N, now].
+    papers = get_recent_papers(days=days * 2)
+    if not papers:
+        result = f"No papers found to compute trends over the last {days * 2} days."
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    rows = compute_category_trends(
+        papers,
+        recent_days=days,
+        previous_days=days,
+        top_k=6,
+        examples_per_category=3,
+    )
+    result = render_trends_report(rows, recent_days=days, previous_days=days)
+    return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+
 def _send_digest_email(body: str, days: int, to_addr: str) -> None:
     """Send the digest via SMTP. Only called when DIGEST_EMAIL_TO is set."""
     import os
@@ -733,6 +964,14 @@ def _dispatch_intent(state: SupervisorState) -> str:
         return "ingestion"
     if intent == "list":
         return "list"
+    if intent == "export":
+        return "export"
+    if intent == "explain":
+        return "explain"
+    if intent == "saved_tags":
+        return "saved_tags"
+    if intent == "trends":
+        return "trends"
     if intent == "rag":
         return "rag"
     if intent == "summarize":
@@ -792,11 +1031,15 @@ def _build_supervisor_graph(checkpointer=None):
     graph.add_node("route", route_node)
     graph.add_node("ingestion", ingestion_node)
     graph.add_node("list", list_node)
+    graph.add_node("export", export_node)
     graph.add_node("rag", rag_node)
+    graph.add_node("explain", explain_node)
+    graph.add_node("saved_tags", saved_tags_node)
     graph.add_node("summarize", summarize_node)
     graph.add_node("compare", compare_node)
     graph.add_node("tag", tag_node)
     graph.add_node("digest", digest_node)
+    graph.add_node("trends", trends_node)
     graph.add_node("diagram", diagram_node)
     graph.add_node("figures", figures_node)
     graph.add_node("clarify", clarify_node)
@@ -809,11 +1052,15 @@ def _build_supervisor_graph(checkpointer=None):
     _CAPS = (
         "ingestion",
         "list",
+        "export",
         "rag",
+        "explain",
+        "saved_tags",
         "summarize",
         "compare",
         "tag",
         "digest",
+        "trends",
         "diagram",
         "figures",
         "clarify",
@@ -892,6 +1139,7 @@ def launch_supervisor() -> None:
                     "pending_chain": [],
                     "rag_query": "",
                     "last_result": "",
+                    "last_retrieval_context": [],
                     "pinned_paper": "",
                     "pinned_papers": [],
                 }
