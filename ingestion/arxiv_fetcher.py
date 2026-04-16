@@ -11,7 +11,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from databases.stores import llm_fast, papers_store
+from databases.stores import invalidate_fts_index, llm_fast, papers_store
 
 LAST_RUN_FILE = Path(__file__).parent.parent / "databases" / "last_run.txt"
 TOPICS = ["cs.AI", "cs.LG", "cs.CL", "cs.RO"]
@@ -275,9 +275,8 @@ def _load_papers_cache() -> list[dict]:
 
 
 def _invalidate_papers_cache() -> None:
-    global _papers_cache
+    global _papers_cache, _papers_title_index, _papers_arxiv_index, _papers_base_arxiv_index
     _papers_cache = None
-    global _papers_title_index, _papers_arxiv_index, _papers_base_arxiv_index
     _papers_title_index = None
     _papers_arxiv_index = None
     _papers_base_arxiv_index = None
@@ -557,5 +556,6 @@ def _embed_and_store(papers: list[dict]) -> int:
                 )
             )
     papers_store.add_documents(docs)
+    invalidate_fts_index(papers_store)  # force FTS rebuild on next hybrid_search
     print(f"Indexed {len(papers)} papers ({len(docs)} chunks) into vector store.")
     return len(papers)

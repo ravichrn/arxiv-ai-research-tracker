@@ -185,6 +185,15 @@ def _ensure_fts_index(store) -> None:
 _FTS_INDEXED: set[int] = set()
 
 
+def invalidate_fts_index(store) -> None:
+    """Mark a store's FTS index as stale so it is rebuilt on the next search.
+
+    Call this after adding new documents to a store so hybrid_search picks
+    them up via BM25 on the next query.
+    """
+    _FTS_INDEXED.discard(id(store))
+
+
 def _make_papers_store():
     from langchain_community.vectorstores import LanceDB
 
