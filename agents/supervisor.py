@@ -59,6 +59,8 @@ _TOPIC_ALIASES: dict[str, str] = {
     "robot": "cs.RO",
 }
 
+_TOPIC_SET = set(TOPICS)
+
 _SYSTEM_MESSAGE = SystemMessage(
     content=(
         "You are a supervisor for an AI research assistant. You help users fetch "
@@ -168,9 +170,10 @@ def _resolve_topics(raw_topics: list[str]) -> list[str]:
     """Map LLM-returned topic strings to valid arXiv category codes."""
     resolved = []
     for t in raw_topics:
-        t_lower = t.lower().strip()
-        if t in set(TOPICS):
-            resolved.append(t)
+        t_clean = t.strip()
+        t_lower = t_clean.lower()
+        if t_clean in _TOPIC_SET:
+            resolved.append(t_clean)
         elif t_lower in _TOPIC_ALIASES:
             resolved.append(_TOPIC_ALIASES[t_lower])
     return list(dict.fromkeys(resolved))
