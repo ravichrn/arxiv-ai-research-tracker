@@ -67,6 +67,37 @@ compare #2301.12345 and #2504.08123
 ```
 Structured comparison across: problem & motivation, approach, results, limitations, and a verdict on when to prefer each. Falls back to top hybrid search results if no IDs are given.
 
+### Export Metadata
+Export paper metadata deterministically (no LLM calls):
+```
+export saved --bibtex
+export saved --csv
+export #2301.12345v2 --bibtex
+export #2301.12345v2 --csv
+```
+
+### Explain Sources
+Explain why the last RAG answer used certain sources (no LLM calls). Best used as a chain:
+```
+find papers on diffusion models then explain
+```
+
+### Saved Tags & Notes
+Store user-controlled tags/notes for a paper, and reuse them for interest-aware ranking:
+```
+save tag #2301.12345v2 transformers
+show tags #2301.12345v2
+note #2301.12345v2 Important to read later
+show note #2301.12345v2
+```
+
+### Trend Analysis
+Compute rising categories over time windows (no LLM calls):
+```
+trends last 14 days
+trends last 30 days
+```
+
 ### Incremental Ingestion
 A per-topic timestamp registry ensures only newly published papers are fetched on subsequent runs — no duplicates. Papers are assigned canonical arXiv IDs (e.g. `2504.08123v2`) usable across commands.
 

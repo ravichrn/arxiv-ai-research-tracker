@@ -1,5 +1,6 @@
 from langchain_core.tools import tool
 
+from databases.interest_rerank import interest_aware_rerank
 from databases.stores import hybrid_search, papers_store, saved_store
 from guardrails.sanitizer import sanitize_retrieved
 
@@ -24,13 +25,17 @@ def _format_docs(docs) -> str:
 @tool
 def search_papers(query: str) -> str:
     """Search recent AI papers fetched from arXiv."""
-    return _format_docs(hybrid_search(papers_store, query, k=3))
+    docs = hybrid_search(papers_store, query, k=3)
+    docs = interest_aware_rerank(query, docs)
+    return _format_docs(docs)
 
 
 @tool
 def search_saved_papers(query: str) -> str:
     """Search your saved AI papers collection."""
-    return _format_docs(hybrid_search(saved_store, query, k=3))
+    docs = hybrid_search(saved_store, query, k=3)
+    docs = interest_aware_rerank(query, docs)
+    return _format_docs(docs)
 
 
 @tool
