@@ -20,7 +20,12 @@ Self-RAG nodes:
 
 from typing import Annotated
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -115,10 +120,23 @@ def _get_last_answer(state: AgentState) -> str:
 # ---------------------------------------------------------------------------
 _llm_with_tools = llm_agent.bind_tools(_TOOLS)
 
+_MAX_AGENT_MESSAGES = 8  # system msg(s) + this many recent messages sent to the LLM
+
+
+def _slim_messages(messages: list) -> list:
+    """Keep all SystemMessages + the last _MAX_AGENT_MESSAGES non-system messages.
+
+    Prevents ToolMessage blowup: 3 papers x full abstracts x up to 3 rewrite loops
+    can easily push the context over 15k tokens without trimming.
+    """
+    system = [m for m in messages if isinstance(m, SystemMessage)]
+    other = [m for m in messages if not isinstance(m, SystemMessage)]
+    return system + other[-_MAX_AGENT_MESSAGES:]
+
 
 def agent_node(state: AgentState) -> dict:
-    """Call the LLM; it either returns an answer or requests tool calls."""
-    response = _llm_with_tools.invoke(state["messages"])
+    """Call the LLM with a trimmed message window to bound context growth."""
+    response = _llm_with_tools.invoke(_slim_messages(state["messages"]))
     return {"messages": [response]}
 
 

@@ -25,7 +25,7 @@ import re as _re
 from pathlib import Path
 from typing import Annotated
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -37,9 +37,11 @@ from databases.stores import hybrid_search, llm_agent, papers_store
 from guardrails.sanitizer import InputRejected, validate_user_input
 from ingestion.arxiv_fetcher import (
     TOPICS,
+    fetch_paper_content,
     fetch_papers,
     get_paper_by_arxiv_id,
     get_paper_by_title,
+    get_recent_papers,
     list_papers,
 )
 
@@ -60,9 +62,14 @@ _TOPIC_ALIASES: dict[str, str] = {
 _SYSTEM_MESSAGE = SystemMessage(
     content=(
         "You are a supervisor for an AI research assistant. You help users fetch "
-        "recent arXiv papers, search the paper database, and get summaries.\n"
+        "recent arXiv papers, search the paper database, get summaries, compare papers, "
+        "auto-tag/cluster papers, generate digests, create Mermaid diagrams, and extract "
+        "figures from papers.\n"
         "Available capabilities: fetch (ingest new papers), rag (Q&A search), "
-        "summarize (batch summary of papers)."
+        "summarize (batch summary), compare (side-by-side comparison), "
+        "tag (cluster papers by research theme), digest (recent papers digest), "
+        "diagram (Mermaid flowchart of a paper's methodology), "
+        "figures (extract real images/figures from a paper)."
     )
 )
 
@@ -71,16 +78,21 @@ You are a routing assistant for an AI research paper tool.
 
 Given the user request, respond with a JSON object only (no markdown, no explanation):
 {{
-  "steps": [...],      // ordered list from: "fetch", "list", "rag", "summarize"
+  "steps": [...],      // ordered list: fetch|list|rag|summarize|compare|tag|digest|diagram|figures
   "topics": [...],     // arXiv topic codes needed for fetch: cs.AI, cs.LG, cs.CL, cs.RO
-  "rag_query": "..."   // refined search query for rag/summarize steps (empty string if not needed)
+  "rag_query": "..."   // refined query for rag/summarize/tag/diagram (empty string if not needed)
 }}
 
 Rules:
-- Use "fetch" when the user wants to download/retrieve new papers from arXiv (display only).
+- Use "fetch" when the user wants to download/retrieve new papers from arXiv.
 - Use "list" when the user wants to see saved/fetched papers with their IDs and titles.
 - Use "rag" when the user wants to search or ask questions about papers.
 - Use "summarize" when the user wants a summary or overview of papers.
+- Use "compare" when the user wants to compare papers side by side.
+- Use "tag" when the user wants to cluster, tag, or group papers by research theme.
+- Use "digest" when the user wants a digest or overview of recent papers (e.g. "daily digest").
+- Use "diagram" when the user wants a visual diagram or flowchart of a paper's methodology.
+- Use "figures" when the user wants actual images/figures from the paper (not a generated diagram).
 - Multi-step requests get multiple entries in "steps" (max {max_steps}).
 - If topics are not mentioned for a fetch, return an empty list (means fetch all).
 - If the request is unclear or unrelated, return {{"steps": [], "topics": [], "rag_query": ""}}.
@@ -94,23 +106,27 @@ User request: {query}
 # ---------------------------------------------------------------------------
 class SupervisorState(TypedDict):
     messages: Annotated[list, add_messages]
-    intent: str  # current step being executed: "fetch" | "rag" | "summarize" | "unknown"
+    intent: str  # "fetch" | "rag" | "summarize" | "compare" | "list" | "unknown"
     resolved_topics: list[str]  # parsed arXiv topic codes for fetch
     pending_chain: list[str]  # remaining steps in a multi-step request
     rag_query: str  # refined query for rag/summarize nodes
     last_result: str  # output from the last completed sub-agent
-    pinned_paper: str  # title of a specific paper pinned via #N reference (empty = no pin)
+    pinned_paper: str  # title of a specific paper pinned via #arxiv_id (empty = no pin)
+    pinned_papers: list[str]  # all titles pinned via #arxiv_id refs (used by compare_node)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _resolve_paper_ref(query: str) -> tuple[str, str]:
-    """Replace #<arxiv_id> references with paper titles. Returns (resolved_query, pinned_title).
+def _resolve_paper_ref(query: str) -> tuple[str, str, list[str]]:
+    """Replace #<arxiv_id> references with paper titles.
+
+    Returns (resolved_query, pinned_title, all_pinned_titles).
+    - resolved_query: query with #id tokens replaced by quoted paper titles
+    - pinned_title: non-empty only when exactly one paper is referenced (used by summarize_node)
+    - all_pinned_titles: all resolved titles in order (used by compare_node)
 
     Matches patterns like #2301.12345v2 or #2301.12345.
-    pinned_title is non-empty only when exactly one paper is referenced, so downstream
-    nodes can retrieve that paper directly instead of doing a broad similarity search.
     """
     pinned: list[str] = []
 
@@ -124,7 +140,7 @@ def _resolve_paper_ref(query: str) -> tuple[str, str]:
     # Match #2301.12345v2 or #2301.12345 (digits, dot, digits, optional version)
     resolved = _re.sub(r"#(\d{4}\.\d{4,5}(?:v\d+)?)", _replace, query)
     pinned_title = pinned[0] if len(pinned) == 1 else ""
-    return resolved, pinned_title
+    return resolved, pinned_title, pinned
 
 
 def _last_human_content(state: SupervisorState) -> str:
@@ -157,14 +173,7 @@ def _resolve_topics(raw_topics: list[str]) -> list[str]:
             resolved.append(t)
         elif t_lower in _TOPIC_ALIASES:
             resolved.append(_TOPIC_ALIASES[t_lower])
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    out = []
-    for t in resolved:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
+    return list(dict.fromkeys(resolved))
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +193,7 @@ def route_node(state: SupervisorState) -> dict:
         return {"intent": next_intent, "pending_chain": pending}
 
     # First call — parse intent from the user query.
-    query, pinned_title = _resolve_paper_ref(_last_human_content(state))
+    query, pinned_title, all_pinned = _resolve_paper_ref(_last_human_content(state))
     prompt = _ROUTE_PROMPT.format(query=query, max_steps=_MAX_CHAIN_STEPS)
     raw = str(llm_agent.invoke(prompt).content)
     parsed = _parse_route(raw)
@@ -212,6 +221,7 @@ def route_node(state: SupervisorState) -> dict:
         "pending_chain": remaining,
         "rag_query": rag_query,
         "pinned_paper": pinned_title,
+        "pinned_papers": all_pinned,
     }
 
 
@@ -275,6 +285,10 @@ def summarize_node(state: SupervisorState) -> dict:
                 f"Abstract: {paper['abstract']}"
             )
             answer = str(llm_agent.invoke(prompt).content)
+            # Prepend S2 TLDR if available
+            s2_tldr = paper.get("s2_tldr")
+            if s2_tldr:
+                answer = f"TL;DR (Semantic Scholar): {s2_tldr}\n\n---\n\n{answer}"
             return {"last_result": answer, "messages": [AIMessage(content=answer)]}
 
     print(f"  [Supervisor] Summarizing papers for: {query}")
@@ -293,18 +307,418 @@ def clarify_node(state: SupervisorState) -> dict:
     """Ask the user to rephrase when intent is unclear."""
     clarification = (
         "I'm not sure what you'd like to do. You can ask me to:\n"
-        "- **Fetch** new papers (e.g. 'fetch recent NLP papers') — displays results immediately\n"
-        "- **Index** fetched papers (e.g. 'index papers') — embeds them so you can search\n"
+        "- **Fetch** new papers (e.g. 'fetch recent NLP papers')\n"
         "- **Search** for papers (e.g. 'find papers on diffusion models')\n"
         "- **Summarize** papers (e.g. 'summarize recent robotics papers')\n"
-        "- **Chain** steps (e.g. 'fetch ML papers then index then find the best on LLMs')"
+        "- **Compare** papers (e.g. 'compare #2301.12345 and #2504.08123')\n"
+        "- **Tag** papers by research theme (e.g. 'tag papers')\n"
+        "- **Digest** recent papers (e.g. 'daily digest' or 'digest last 14 days')\n"
+        "- **Diagram** a paper's methodology (e.g. 'diagram #2504.08123')\n"
+        "- **Figures** extract real images from a paper (e.g. 'get figures from #2504.08123')\n"
+        "- **Chain** steps (e.g. 'fetch ML papers then find the best on LLMs')"
     )
     return {"last_result": clarification, "messages": [AIMessage(content=clarification)]}
 
 
+_COMPARE_PROMPT = """\
+You are a research analyst comparing AI papers side by side.
+
+{papers_section}
+
+Produce a structured comparison with these sections:
+
+## Comparison: {titles}
+
+### Problem & Motivation
+For each paper: what problem does it address and why does it matter?
+
+### Approach & Methodology
+For each paper: what is the core technical approach?
+
+### Key Results & Contributions
+For each paper: what are the headline results or contributions?
+
+### Limitations & Future Work
+For each paper: what are the stated or apparent limitations?
+
+### When to Prefer Each
+Give a clear, opinionated verdict: in what scenario would a researcher choose one over the other?
+"""
+
+
+def compare_node(state: SupervisorState) -> dict:
+    """Compare two or more papers side by side with a structured LLM analysis.
+
+    If papers are pinned via #arxiv_id, looks them up directly from JSONL.
+    Otherwise falls back to hybrid search using the rag_query and compares the top results.
+    """
+    pinned = state.get("pinned_papers", [])
+    query = state.get("rag_query") or _last_human_content(state)
+
+    papers: list[dict] = []
+
+    if len(pinned) >= 2:
+        # Direct lookup for each pinned title
+        for title in pinned:
+            paper = get_paper_by_title(title)
+            if paper:
+                papers.append(paper)
+        if len(papers) < 2:
+            missing = len(pinned) - len(papers)
+            return {
+                "last_result": (
+                    f"Could not find {missing} of the referenced paper(s). "
+                    "Check the arXiv IDs and ensure the papers have been fetched."
+                ),
+                "messages": [
+                    AIMessage(
+                        content=f"Could not find {missing} of the referenced paper(s). "
+                        "Check the arXiv IDs and ensure papers have been fetched."
+                    )
+                ],
+            }
+    else:
+        # No pins or only one — search and take top results
+        print(f"  [Supervisor] Compare: no papers pinned, searching for: {query}")
+        docs = hybrid_search(papers_store, query, k=4, rerank=True)
+        seen_titles: set[str] = set()
+        for doc in docs:
+            title = doc.metadata.get("title", "")
+            if title and title not in seen_titles:
+                paper = get_paper_by_title(title)
+                if paper:
+                    papers.append(paper)
+                    seen_titles.add(title)
+            if len(papers) >= 2:
+                break
+
+        if len(papers) < 2:
+            result = (
+                "Not enough papers found to compare. Try referencing papers directly "
+                "with their arXiv IDs (e.g. 'compare #2301.12345 and #2504.08123'), "
+                "or fetch more papers first."
+            )
+            return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    print(f"  [Supervisor] Comparing {len(papers)} paper(s): {[p['title'] for p in papers]}")
+
+    papers_section_parts = []
+    for i, paper in enumerate(papers, 1):
+        papers_section_parts.append(
+            f"**Paper {i}: {paper['title']}**\n"
+            f"Authors: {paper['authors']}\n"
+            f"Published: {paper['published'][:10]}\n"
+            f"Abstract: {paper['abstract']}"
+        )
+    papers_section = "\n\n---\n\n".join(papers_section_parts)
+
+    short_titles = " vs ".join(
+        p["title"][:50] + ("…" if len(p["title"]) > 50 else "") for p in papers
+    )
+    prompt = _COMPARE_PROMPT.format(papers_section=papers_section, titles=short_titles)
+    answer = str(llm_agent.invoke(prompt).content)
+    return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
+
+_TAG_PROMPT = """\
+You are a research analyst. Below is a list of AI paper titles and their arXiv categories.
+
+{papers_list}
+
+Group these papers into 4-7 concise research theme clusters (e.g. "Diffusion Models", \
+"LLM Alignment", "Embodied Agents"). For each cluster:
+- Give it a short, descriptive name (2-4 words)
+- List the paper numbers that belong to it
+
+Respond in this exact format (no extra text):
+
+### <Theme Name>
+- [<num>] <title>
+...
+
+### <Theme Name>
+- [<num>] <title>
+...
+"""
+
+_DIGEST_PROMPT = """\
+You are a research newsletter editor. Below are AI papers published in the last {days} days, \
+grouped by arXiv category.
+
+{papers_section}
+
+Write a concise research digest (newsletter style):
+1. A one-paragraph executive summary of the most notable trends across all papers.
+2. For each category, 2-3 bullet highlights (what problem, what approach, why it matters).
+
+Keep the tone professional but accessible to a senior ML engineer. \
+Total length: 300-500 words.
+"""
+
+_DIAGRAM_PROMPT = """\
+You are a technical writer producing Mermaid diagrams for AI papers.
+
+Title: {title}
+Abstract: {abstract}
+
+Generate a Mermaid flowchart (flowchart TD) that illustrates the paper's methodology: \
+key inputs, processing steps, model components, and outputs. Use concise node labels \
+(≤6 words each). Include at least 6 nodes.
+
+Output ONLY the raw Mermaid code block — no explanation, no markdown prose:
+
+```mermaid
+flowchart TD
+    ...
+```
+"""
+
+
+def tag_node(state: SupervisorState) -> dict:
+    """Cluster all fetched papers into research themes via a single LLM call.
+
+    Loads all papers from JSONL, sends titles + categories to the LLM for batch
+    clustering into 4-7 named themes, and prints the grouped result.
+    """
+    papers = get_recent_papers(days=365)  # tag across all fetched papers
+    if not papers:
+        result = "No papers found. Run a fetch first, then try tagging."
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    print(f"  [Supervisor] Clustering {len(papers)} paper(s) into research themes...")
+
+    # Prefer Semantic Scholar fields of study if available for >=80% of papers
+    s2_covered = sum(1 for p in papers if p.get("s2_fields"))
+    if s2_covered / len(papers) >= 0.8:
+        print(f"  [Supervisor] Using S2 fields for {s2_covered} papers (no LLM call).")
+        groups: dict[str, list[str]] = {}
+        for p in papers:
+            fields = p.get("s2_fields") or []
+            primary = fields[0] if fields else "Other"
+            groups.setdefault(primary, []).append(p["title"])
+        lines = []
+        for field, titles in sorted(groups.items()):
+            lines.append(f"\n### {field}")
+            for title in titles:
+                lines.append(f"- {title}")
+        answer = "\n".join(lines)
+        return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
+    lines = []
+    for i, p in enumerate(papers, 1):
+        cats = p.get("categories", "")
+        lines.append(f"{i}. [{cats}] {p['title']}")
+    papers_list = "\n".join(lines)
+
+    prompt = _TAG_PROMPT.format(papers_list=papers_list)
+    answer = str(llm_agent.invoke(prompt).content)
+    return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
+
+def digest_node(state: SupervisorState) -> dict:
+    """Generate a newsletter-style digest of papers from the last N days.
+
+    Defaults to 7 days. Optionally sends via email if SMTP env vars are set.
+    """
+    import os
+
+    days = 7
+    # Allow "last 14 days digest" etc. via rag_query hint
+    query = state.get("rag_query") or _last_human_content(state)
+    for token in query.split():
+        if token.isdigit():
+            days = max(1, min(int(token), 90))
+            break
+
+    papers = get_recent_papers(days=days)
+    if not papers:
+        result = (
+            f"No papers found in the last {days} days. "
+            "Try fetching first or increase the day range."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    print(f"  [Supervisor] Generating digest for {len(papers)} paper(s) from last {days} day(s)...")
+
+    # Group by primary arXiv category
+    groups: dict[str, list[dict]] = {}
+    for p in papers:
+        primary_cat = p.get("categories", "unknown").split(",")[0].strip()
+        groups.setdefault(primary_cat, []).append(p)
+
+    section_parts = []
+    for cat, cat_papers in sorted(groups.items()):
+        lines = [f"**{cat}** ({len(cat_papers)} paper(s)):"]
+        for p in cat_papers[:10]:  # cap per-category to keep prompt manageable
+            lines.append(f"  - {p['title']} ({p.get('published', '')[:10]})")
+        section_parts.append("\n".join(lines))
+    papers_section = "\n\n".join(section_parts)
+
+    prompt = _DIGEST_PROMPT.format(days=days, papers_section=papers_section)
+    answer = str(llm_agent.invoke(prompt).content)
+
+    # Optionally send via email
+    email_to = os.getenv("DIGEST_EMAIL_TO", "")
+    if email_to:
+        _send_digest_email(answer, days, email_to)
+
+    return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
+
+def _send_digest_email(body: str, days: int, to_addr: str) -> None:
+    """Send the digest via SMTP. Only called when DIGEST_EMAIL_TO is set."""
+    import os
+    import smtplib
+    from email.mime.text import MIMEText
+
+    host = os.getenv("DIGEST_SMTP_HOST", "")
+    port = int(os.getenv("DIGEST_SMTP_PORT", "587"))
+    user = os.getenv("DIGEST_SMTP_USER", "")
+    password = os.getenv("DIGEST_SMTP_PASS", "")
+    from_addr = os.getenv("DIGEST_EMAIL_FROM", user)
+
+    if not host or not user or not password:
+        print("  [Digest] Email skipped — DIGEST_SMTP_HOST/USER/PASS not configured.")
+        return
+
+    from datetime import date
+
+    subject = f"arXiv AI Research Digest — last {days} days ({date.today()})"
+    msg = MIMEText(body, "plain")
+    msg["Subject"] = subject
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+
+    try:
+        with smtplib.SMTP(host, port) as server:
+            server.starttls()
+            server.login(user, password)
+            server.sendmail(from_addr, [to_addr], msg.as_string())
+        print(f"  [Digest] Email sent to {to_addr}.")
+    except Exception as e:
+        print(f"  [Digest] Email failed: {e}")
+
+
+def diagram_node(state: SupervisorState) -> dict:
+    """Generate a Mermaid flowchart diagram of a paper's methodology.
+
+    Requires a paper pinned via #arxiv_id. Falls back to the top search result
+    if no paper is pinned.
+    """
+    pinned = state.get("pinned_paper", "")
+    query = state.get("rag_query") or _last_human_content(state)
+
+    paper: dict | None = None
+    if pinned:
+        paper = get_paper_by_title(pinned)
+    if paper is None:
+        docs = hybrid_search(papers_store, query, k=3, rerank=True)
+        for doc in docs:
+            title = doc.metadata.get("title", "")
+            if title:
+                paper = get_paper_by_title(title)
+                if paper:
+                    break
+
+    if paper is None:
+        result = (
+            "No paper found to diagram. Reference one with its arXiv ID "
+            "(e.g. 'diagram #2301.12345') or fetch papers first."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    print(f"  [Supervisor] Generating Mermaid diagram for: {paper['title']}")
+    prompt = _DIAGRAM_PROMPT.format(title=paper["title"], abstract=paper["abstract"])
+    answer = str(llm_agent.invoke(prompt).content)
+    return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
+
+def figures_node(state: SupervisorState) -> dict:
+    """Extract real figures from a paper (arXiv HTML first, PDF fallback).
+
+    Requires a paper pinned via #arxiv_id. Falls back to a Mermaid diagram
+    (using _DIAGRAM_PROMPT) if no figures can be found in HTML or PDF.
+    """
+    pinned = state.get("pinned_paper", "")
+
+    if not pinned:
+        result = (
+            "Please specify a paper by its arXiv ID to extract figures "
+            "(e.g. 'get figures from #2504.08123')."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    paper = get_paper_by_title(pinned)
+    if paper is None:
+        result = (
+            f"Could not find paper '{pinned}'. "
+            "Check the arXiv ID and ensure the paper has been fetched."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    arxiv_id = paper.get("arxiv_id", "")
+    pdf_url = paper.get("pdf_url", "")
+    print(f"  [Supervisor] Extracting figures for: {paper['title']}")
+
+    content = fetch_paper_content(arxiv_id, pdf_url)
+
+    if content and content.get("figures"):
+        figures = content["figures"]
+        source = content["source"]
+
+        if source == "html":
+            lines = [f"Found {len(figures)} figure(s) in paper (source: arXiv HTML):\n"]
+            for i, fig in enumerate(figures, 1):
+                caption = fig.get("caption") or "(no caption)"
+                lines.append(f"[Figure {i}] {caption}")
+                lines.append(f"  -> {fig['url']}\n")
+            sections = content.get("sections", [])
+            if sections:
+                lines.append(f"Sections available: {', '.join(sections[:10])}")
+        else:  # pdf
+            lines = [f"Found {len(figures)} figure(s) extracted from PDF:\n"]
+            for fig in figures:
+                lines.append(f"[Page {fig['page']}] -> {fig['path']}")
+
+        answer = "\n".join(lines)
+        return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
+    # Fallback to Mermaid diagram when no figures found
+    print(f"  [Supervisor] No figures found for '{paper['title']}' — falling back to Mermaid.")
+    fallback_note = (
+        "No figures could be extracted from this paper (HTML unavailable, PDF has no images). "
+        "Generating a Mermaid methodology diagram instead:\n\n"
+    )
+    prompt = _DIAGRAM_PROMPT.format(title=paper["title"], abstract=paper["abstract"])
+    mermaid = str(llm_agent.invoke(prompt).content)
+    answer = fallback_note + mermaid
+    return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
+
+_MAX_SUPERVISOR_MESSAGES = 20  # keep last N messages in the supervisor's conversation history
+
+
 def finalize_node(state: SupervisorState) -> dict:
-    """Pass-through; last_result is already set by the capability node."""
-    return {}
+    """Trim conversation history to bound context growth across turns.
+
+    Keeps the SystemMessage(s) and the most recent _MAX_SUPERVISOR_MESSAGES
+    non-system messages. Older messages are deleted via RemoveMessage so the
+    checkpointer doesn't restore them on the next turn.
+    """
+    msgs = state["messages"]
+    other_msgs = [m for m in msgs if not isinstance(m, SystemMessage)]
+
+    if len(other_msgs) <= _MAX_SUPERVISOR_MESSAGES:
+        return {}
+
+    to_remove = other_msgs[: len(other_msgs) - _MAX_SUPERVISOR_MESSAGES]
+    removals = [RemoveMessage(id=m.id) for m in to_remove if getattr(m, "id", None)]
+    if not removals:
+        return {}
+
+    kept = len(other_msgs) - len(to_remove)
+    print(f"  [Supervisor] Trimmed {len(to_remove)} old message(s); keeping {kept}.")
+    return {"messages": removals}
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +734,16 @@ def _dispatch_intent(state: SupervisorState) -> str:
         return "rag"
     if intent == "summarize":
         return "summarize"
+    if intent == "compare":
+        return "compare"
+    if intent == "tag":
+        return "tag"
+    if intent == "digest":
+        return "digest"
+    if intent == "diagram":
+        return "diagram"
+    if intent == "figures":
+        return "figures"
     return "clarify"
 
 
@@ -367,6 +791,11 @@ def _build_supervisor_graph(checkpointer=None):
     graph.add_node("list", list_node)
     graph.add_node("rag", rag_node)
     graph.add_node("summarize", summarize_node)
+    graph.add_node("compare", compare_node)
+    graph.add_node("tag", tag_node)
+    graph.add_node("digest", digest_node)
+    graph.add_node("diagram", diagram_node)
+    graph.add_node("figures", figures_node)
     graph.add_node("clarify", clarify_node)
     graph.add_node("finalize", finalize_node)
 
@@ -374,7 +803,19 @@ def _build_supervisor_graph(checkpointer=None):
     graph.add_conditional_edges("route", _dispatch_intent)
 
     # After each capability, either chain to next step or finalize
-    for cap in ("ingestion", "list", "rag", "summarize", "clarify"):
+    _CAPS = (
+        "ingestion",
+        "list",
+        "rag",
+        "summarize",
+        "compare",
+        "tag",
+        "digest",
+        "diagram",
+        "figures",
+        "clarify",
+    )
+    for cap in _CAPS:
         graph.add_conditional_edges(
             cap, _route_after_capability, {"route": "route", "finalize": "finalize"}
         )
@@ -391,18 +832,24 @@ def _build_supervisor_graph(checkpointer=None):
 # Nodes whose LLM calls produce token-level output worth streaming to the user.
 # (rag_node invokes a sub-graph — its tokens don't surface here; ingestion/list
 # return brief status strings, not long LLM-generated text.)
-_STREAMING_NODES = {"summarize", "clarify"}
+_STREAMING_NODES = {"summarize", "clarify", "compare", "tag", "digest", "diagram", "figures"}
 
 _DB_DIR = Path(__file__).parent.parent / "databases"
 
 
 def launch_supervisor() -> None:
-    print("\n[Supervisor Ready] Ask me to fetch papers, index, search, summarize, or chain tasks.")
+    print("\n[Supervisor Ready] Fetch, search, summarize, compare, tag, digest, or diagram papers.")
     print("Examples:")
     print("  - 'fetch recent robotics papers'")
     print("  - 'find papers on diffusion models'")
-    print("  - 'fetch NLP papers then find the best on transformers'")
     print("  - 'summarize recent cs.AI papers'")
+    print("  - 'compare #2301.12345 and #2504.08123'")
+    print("  - 'tag papers'                        (cluster all papers by research theme)")
+    print("  - 'daily digest'                      (recent papers digest, last 7 days)")
+    print("  - 'digest last 14 days'               (custom day range)")
+    print("  - 'diagram #2504.08123'               (Mermaid flowchart of methodology)")
+    print("  - 'get figures from #2504.08123'      (extract real images from paper)")
+    print("  - 'fetch NLP papers then find the best on transformers'")
     print("  - Type 'new session' to start a fresh conversation\n")
 
     with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
@@ -443,6 +890,7 @@ def launch_supervisor() -> None:
                     "rag_query": "",
                     "last_result": "",
                     "pinned_paper": "",
+                    "pinned_papers": [],
                 }
 
                 # Stream both state snapshots (values) and LLM token chunks (messages).
