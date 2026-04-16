@@ -66,6 +66,17 @@ class _CachedEmbeddings(Embeddings):
         stop=stop_after_attempt(4),
         reraise=True,
     )
+    def _embed_many_docs(self, texts: list[str]) -> list[list[float]]:
+        """Embed many documents in one call (preserves input order)."""
+        assert self._base is not None
+        return self._base.embed_documents(texts)
+
+    @retry(
+        retry=retry_if_exception_type(Exception),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        stop=stop_after_attempt(4),
+        reraise=True,
+    )
     def _embed_one_query(self, text: str) -> list[float]:
         assert self._base is not None
         return self._base.embed_query(text)
@@ -73,13 +84,33 @@ class _CachedEmbeddings(Embeddings):
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         self._init()
         assert self._cache is not None
-        results = []
-        for text in texts:
-            key = f"doc:{hashlib.sha256(text.encode()).hexdigest()}"
-            if key not in self._cache:
-                self._cache.set(key, self._embed_one_doc(text), expire=_EMBEDDING_TTL_SECONDS)
-            results.append(list(self._cache[key]))
-        return results
+        results: list[list[float] | None] = [None] * len(texts)
+
+        # Cache key per text (so repeated inputs within one call don't re-embed).
+        keys = [f"doc:{hashlib.sha256(text.encode()).hexdigest()}" for text in texts]
+        missing_texts_by_key: dict[str, str] = {}
+        missing_indices_by_key: dict[str, list[int]] = {}
+
+        for i, (text, key) in enumerate(zip(texts, keys, strict=True)):
+            if key in self._cache:
+                results[i] = list(self._cache[key])
+            else:
+                missing_texts_by_key[key] = text
+                missing_indices_by_key.setdefault(key, []).append(i)
+
+        if missing_texts_by_key:
+            missing_keys = list(missing_texts_by_key.keys())
+            missing_texts = [missing_texts_by_key[k] for k in missing_keys]
+            embeddings = self._embed_many_docs(missing_texts)
+
+            for key, emb in zip(missing_keys, embeddings, strict=True):
+                self._cache.set(key, emb, expire=_EMBEDDING_TTL_SECONDS)
+                for idx in missing_indices_by_key[key]:
+                    results[idx] = list(emb)
+
+        # All cache misses are filled above; keep output length stable.
+        assert all(r is not None for r in results)
+        return [r for r in results]  # type: ignore[return-value]
 
     def embed_query(self, text: str) -> list[float]:
         self._init()
@@ -135,12 +166,23 @@ def _ensure_fts_index(store) -> None:
     an FTS index on an empty table is a no-op that silently fails in some
     LanceDB versions, so we guard with a row count check.
     """
+    # Avoid repeating index creation attempts once the table is non-empty.
+    # (But we only mark "done" after a successful index build.)
+    key = id(store)
+    if key in _FTS_INDEXED:
+        return
+
     try:
         tbl = store.get_table()
-        if tbl.count_rows() > 0:
-            tbl.create_fts_index("text", replace=True, language="English", stem=True)
+        if tbl.count_rows() <= 0:
+            return
+        tbl.create_fts_index("text", replace=True, language="English", stem=True)
+        _FTS_INDEXED.add(key)
     except Exception as e:
         print(f"[FTS] index creation skipped: {e}")
+
+
+_FTS_INDEXED: set[int] = set()
 
 
 def _make_papers_store():
