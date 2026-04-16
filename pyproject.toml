@@ -35,6 +35,8 @@ dependencies = [
     "numpy",
     "pandas",
     "requests",
+    "beautifulsoup4",          # HTML parsing for arXiv figure extraction
+    "pymupdf",                 # PDF image extraction fallback
     "tenacity",
     "tqdm",
     "pydantic",

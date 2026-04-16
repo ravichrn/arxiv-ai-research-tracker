@@ -2,8 +2,10 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urljoin
 
 import arxiv
+import requests
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -143,7 +145,10 @@ def get_paper_by_title(title: str) -> dict | None:
 
 
 def list_papers() -> str:
-    """Return a formatted list of all saved papers with arXiv IDs and titles."""
+    """Return a formatted list of all saved papers with arXiv IDs and titles.
+
+    Includes citation count and S2 TLDR when available from Semantic Scholar enrichment.
+    """
     papers = _load_papers_cache()
     if not papers:
         return "No papers saved yet. Run a fetch first."
@@ -151,6 +156,15 @@ def list_papers() -> str:
     for p in papers:
         arxiv_id = p.get("arxiv_id") or p.get("url", "")
         lines.append(f"  [{arxiv_id}]  {p.get('title', '(no title)')}")
+        citations = p.get("s2_citations")
+        tldr = p.get("s2_tldr")
+        if citations is not None or tldr:
+            meta_parts = []
+            if citations is not None:
+                meta_parts.append(f"Citations: {citations:,}")
+            if tldr:
+                meta_parts.append(f"TL;DR: {tldr}")
+            lines.append(f"    {' | '.join(meta_parts)}")
     lines.append("\nReference any paper with #<arxiv_id>, e.g. 'summarize #2504.08123v1'")
     return "\n".join(lines)
 
@@ -186,6 +200,7 @@ _splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=100)
 
 
 _RAW_PAPERS_FILE = Path(__file__).parent.parent / "databases" / "papers_raw.jsonl"
+_DB_DIR = Path(__file__).parent.parent / "databases"
 
 # Module-level cache for papers_raw.jsonl — avoids re-reading the file on every
 # get_paper_by_title / get_paper_by_arxiv_id / list_papers call within a session.
@@ -242,6 +257,9 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
     new_count = 0
     new_papers: list[dict] = []
 
+    # Track the file offset before appending so we can rewrite enriched data later.
+    append_offset = _RAW_PAPERS_FILE.stat().st_size if _RAW_PAPERS_FILE.exists() else 0
+
     with _RAW_PAPERS_FILE.open("a") as fh:
         for i, topic in enumerate(topics):
             if i > 0:
@@ -269,6 +287,7 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
                     paper = {
                         "arxiv_id": _arxiv_id(result),
                         "url": result.entry_id,
+                        "pdf_url": str(result.pdf_url),
                         "title": result.title,
                         "authors": ", ".join(a.name for a in result.authors),
                         "abstract": result.summary,
@@ -289,6 +308,16 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
                 print(f"\n[{topic}] {topic_count} new papers saved.")
             new_count += topic_count
 
+    # Enrich new papers with Semantic Scholar metadata, then rewrite their JSONL lines.
+    if new_papers:
+        new_papers = enrich_with_s2(new_papers)
+        # Truncate back to the pre-append offset and re-append enriched records.
+        with _RAW_PAPERS_FILE.open("r+b") as fh:
+            fh.truncate(append_offset)
+        with _RAW_PAPERS_FILE.open("a") as fh:
+            for paper in new_papers:
+                fh.write(json.dumps(paper) + "\n")
+
     _invalidate_papers_cache()
     _save_last_run(topics, fetched_all)
     print(f"\n{'=' * 70}")
@@ -297,6 +326,159 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
         print("Tip: Reference any paper above by its arXiv ID, e.g. 'summarize #2301.12345v2'")
         _embed_and_store(new_papers)
     return new_count
+
+
+def get_recent_papers(days: int = 7) -> list[dict]:
+    """Return papers published within the last *days* days, newest first.
+
+    Reads from ``papers_raw.jsonl`` — no network calls. Uses the ``published``
+    field (ISO 8601, stored during fetch) to filter by date.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    results: list[dict] = []
+    for paper in _load_papers_cache():
+        pub_raw = paper.get("published", "")
+        if not pub_raw:
+            continue
+        try:
+            pub_dt = datetime.fromisoformat(pub_raw)
+            # Ensure timezone-aware for comparison
+            if pub_dt.tzinfo is None:
+                pub_dt = pub_dt.replace(tzinfo=UTC)
+            if pub_dt >= cutoff:
+                results.append(paper)
+        except ValueError:
+            pass
+    results.sort(key=lambda p: p.get("published", ""), reverse=True)
+    return results
+
+
+def fetch_paper_content(arxiv_id: str, pdf_url: str) -> dict | None:
+    """Extract figures from a paper. Tries arXiv HTML first, falls back to PDF.
+
+    Returns:
+        {"figures": [...], "sections": [...], "source": "html"|"pdf"} or None if both fail.
+        HTML figures: [{"url": str, "caption": str}]
+        PDF figures:  [{"path": str, "page": int}]
+    """
+    # --- HTML path (ar5iv) ---
+    try:
+        html_url = f"https://html.arxiv.org/abs/{arxiv_id}"
+        resp = requests.get(html_url, timeout=15)
+        if resp.status_code == 200:
+            from bs4 import BeautifulSoup  # lazy import
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            figures = []
+            for fig in soup.find_all("figure"):
+                img = fig.find("img")
+                if not img or not img.get("src"):
+                    continue
+                img_url = urljoin(html_url, img["src"])
+                caption_tag = fig.find("figcaption")
+                caption = caption_tag.get_text(strip=True) if caption_tag else ""
+                figures.append({"url": img_url, "caption": caption})
+            sections = [
+                s.get("id", s.get_text(strip=True))
+                for s in soup.find_all("section")
+                if s.get("id") or s.get_text(strip=True)
+            ]
+            # Only return HTML result if we actually found figures
+            if figures:
+                return {"figures": figures, "sections": sections[:20], "source": "html"}
+    except Exception as e:
+        print(f"[figures] HTML fetch failed: {e}")
+
+    # --- PDF fallback ---
+    try:
+        pdf_resp = requests.get(pdf_url, timeout=30)
+        if pdf_resp.status_code == 200:
+            import fitz  # lazy import (pymupdf)
+
+            doc = fitz.open(stream=pdf_resp.content, filetype="pdf")
+            out_dir = _DB_DIR / "paper_figures" / arxiv_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+            figures = []
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                for img_index, img_info in enumerate(page.get_images(full=True)):
+                    xref = img_info[0]
+                    img_data = doc.extract_image(xref)
+                    img_bytes = img_data["image"]
+                    ext = img_data.get("ext", "png")
+                    out_path = out_dir / f"fig_p{page_num}_n{img_index}.{ext}"
+                    out_path.write_bytes(img_bytes)
+                    figures.append({"path": str(out_path), "page": page_num})
+            if figures:
+                return {"figures": figures, "sections": [], "source": "pdf"}
+    except Exception as e:
+        print(f"[figures] PDF extraction failed: {e}")
+
+    return None
+
+
+def enrich_with_s2(papers: list[dict]) -> list[dict]:
+    """Batch-enrich papers with Semantic Scholar metadata (TLDR, citation count, fields).
+
+    Sends all arXiv IDs in one POST request to the S2 Graph API.
+    Adds s2_tldr, s2_citations, s2_fields to each paper dict in-place.
+    Best-effort: returns papers unchanged if S2 is unreachable.
+    """
+    if not papers:
+        return papers
+
+    ids = [f"arXiv:{p['arxiv_id']}" for p in papers if p.get("arxiv_id")]
+    if not ids:
+        return papers
+
+    try:
+        resp = requests.post(
+            "https://api.semanticscholar.org/graph/v1/paper/batch",
+            params={"fields": "tldr,citationCount,fieldsOfStudy"},
+            json={"ids": ids},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"[S2] enrichment skipped: HTTP {resp.status_code}")
+            return papers
+
+        results = resp.json()
+        # Build lookup: base arXiv ID → S2 record
+        s2_by_id: dict[str, dict] = {}
+        for record in results:
+            if not record:
+                continue
+            ext_ids = record.get("externalIds") or {}
+            arxiv_raw = ext_ids.get("ArXiv") or ""
+            if arxiv_raw:
+                s2_by_id[arxiv_raw.split("v")[0]] = record
+
+        enriched = 0
+        for paper in papers:
+            arxiv_id = paper.get("arxiv_id", "")
+            base = arxiv_id.split("v")[0]
+            record = s2_by_id.get(base)
+            if record:
+                tldr_obj = record.get("tldr")
+                paper["s2_tldr"] = tldr_obj.get("text") if tldr_obj else None
+                paper["s2_citations"] = record.get("citationCount")
+                fields = record.get("fieldsOfStudy")
+                paper["s2_fields"] = fields if fields else None
+                enriched += 1
+            else:
+                paper["s2_tldr"] = None
+                paper["s2_citations"] = None
+                paper["s2_fields"] = None
+
+        print(f"[S2] enriched {enriched}/{len(papers)} papers.")
+    except Exception as e:
+        print(f"[S2] enrichment skipped: {e}")
+        for paper in papers:
+            paper.setdefault("s2_tldr", None)
+            paper.setdefault("s2_citations", None)
+            paper.setdefault("s2_fields", None)
+
+    return papers
 
 
 def _embed_and_store(papers: list[dict]) -> int:

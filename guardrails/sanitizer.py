@@ -59,6 +59,11 @@ _INJECTION_PATTERNS: list[str] = [
 ]
 
 _COMPILED = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in _INJECTION_PATTERNS]
+# Combined pattern for single-pass substitution in sanitize_retrieved.
+_COMBINED = re.compile(
+    "|".join(_INJECTION_PATTERNS),
+    re.IGNORECASE | re.UNICODE,
+)
 
 # Hard length cap on retrieved fields — a 10 000-char "title" is a red flag.
 _MAX_FIELD_LENGTH = 2000
@@ -85,8 +90,7 @@ def sanitize_retrieved(text: str) -> str:
     text = text[:_MAX_FIELD_LENGTH]
     text = _normalize(text)
 
-    for pattern in _COMPILED:
-        text = pattern.sub("[blocked]", text)
+    text = _COMBINED.sub("[blocked]", text)
 
     return text
 
