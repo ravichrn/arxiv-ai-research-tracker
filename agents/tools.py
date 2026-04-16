@@ -1,6 +1,6 @@
 from langchain_core.tools import tool
 
-from databases.stores import hybrid_search, papers_store, saved_store
+from databases.stores import hybrid_search, invalidate_fts_index, papers_store, saved_store
 from guardrails.sanitizer import sanitize_retrieved
 
 
@@ -39,6 +39,7 @@ def add_paper_to_saved(title: str) -> str:
     docs = hybrid_search(papers_store, title, k=1)
     if docs:
         saved_store.add_documents(docs)
+        invalidate_fts_index(saved_store)
         return f"Added '{docs[0].metadata.get('title')}' to saved papers."
     return "Paper not found in current papers."
 
@@ -57,5 +58,6 @@ def delete_paper_from_saved(title: str) -> str:
         else:
             safe_title = matched_title.replace("'", "''")
             saved_store.get_table().delete(f"title = '{safe_title}'")
+        invalidate_fts_index(saved_store)
         return f"Deleted '{matched_title}' from saved papers."
     return "Paper not found in saved papers."
