@@ -201,3 +201,7 @@ CLAUDE.md
 databases/agent_memory.db
 databases/agent_memory.db-shm
 databases/agent_memory.db-wal
+
+# Local Cursor session notes (do not commit)
+CURSOR_CHANGELOG.md
+CURSOR_CHANGELOG_SHORT.md
