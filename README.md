@@ -188,6 +188,24 @@ One-line chat request:
 curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query":"find papers on diffusion models","thread_id":"demo"}'
 ```
 
+One-line streaming chat request (SSE):
+
+```bash
+curl -N -X POST http://localhost:8000/chat/stream -H "Content-Type: application/json" -d '{"query":"summarize recent cs.AI papers","thread_id":"demo"}'
+```
+
+Run with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+Run with optional local Ollama sidecar:
+
+```bash
+docker compose --profile local-llm up --build
+```
+
 ```
 [Supervisor Ready] Fetch, search, summarize, compare, tag, digest, or diagram papers.
 Examples:

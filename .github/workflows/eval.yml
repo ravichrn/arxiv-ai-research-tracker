@@ -29,4 +29,4 @@ jobs:
         run: uv run ruff check .
 
       - name: Run deterministic tests
-        run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest evaluation/test_guardrails.py evaluation/test_feature_helpers.py -q
+        run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest evaluation/test_guardrails.py evaluation/test_feature_helpers.py evaluation/test_api.py -q
