@@ -6,6 +6,11 @@ EVAL_JUDGE env var (set in .env):
   "claude"      → claude-opus-4-6 via Anthropic (cross-provider, use for final eval)
   "openai"      → EVAL_JUDGE_MODEL env var string, default gpt-4o (fallback)
 
+  Default OpenAI judge is gpt-4o (not the agent default) so faithfulness /
+  relevancy are not scored by the same model that wrote the answer — same-model
+  judging tends to inflate scores. Override with EVAL_JUDGE_MODEL=gpt-5.4 only
+  if you accept that bias, or use prometheus / claude for stronger separation.
+
 If EVAL_JUDGE is unset:
   - Uses "claude" if ANTHROPIC_API_KEY is set
   - Falls back to "openai" otherwise
@@ -14,6 +19,10 @@ If EVAL_JUDGE is unset:
 import os
 
 from deepeval.models.base_model import DeepEvalBaseLLM
+
+# OpenAI judge default: different from typical OPENAI_MODEL=gpt-5.4 in .env.example
+# so eval answers and eval metrics are not both from the same checkpoint.
+_DEFAULT_OPENAI_JUDGE_MODEL = "gpt-4o"
 
 
 class PrometheusOllamaJudge(DeepEvalBaseLLM):
@@ -65,8 +74,18 @@ def describe_eval_judge() -> str:
         model = os.getenv("EVAL_JUDGE_MODEL_CLAUDE", "claude-opus-4-6")
         return f"anthropic/{model}"
 
-    model = os.getenv("EVAL_JUDGE_MODEL", "gpt-4o")
+    model = os.getenv("EVAL_JUDGE_MODEL", _DEFAULT_OPENAI_JUDGE_MODEL)
     return f"openai/{model}"
+
+
+def describe_answer_model() -> str:
+    """Label for the LLM that generates RAG/summarizer eval answers (see stores._make_agent_llm)."""
+    choice = os.getenv("AGENT_LLM", "openai").lower()
+    if choice == "claude":
+        m = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6")
+        return f"anthropic/{m}"
+    m = os.getenv("OPENAI_MODEL", "gpt-4o")
+    return f"openai/{m}"
 
 
 def make_judge():
@@ -100,6 +119,6 @@ def make_judge():
         )
 
     # Default: OpenAI string — DeepEval creates ChatOpenAI internally
-    model = os.getenv("EVAL_JUDGE_MODEL", "gpt-4o")
+    model = os.getenv("EVAL_JUDGE_MODEL", _DEFAULT_OPENAI_JUDGE_MODEL)
     print(f"[Judge] {model} via OpenAI")
     return model

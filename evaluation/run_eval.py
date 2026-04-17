@@ -18,10 +18,18 @@ from deepeval.test_case import LLMTestCase
 from databases.stores import hybrid_search, papers_store
 from databases.stores import llm_agent as llm
 from evaluation.datasets import ADVERSARIAL_RAG_CASES, RAG_CASES
-from evaluation.judges import describe_eval_judge, make_judge
+from evaluation.judges import describe_answer_model, describe_eval_judge, make_judge
 from ingestion.arxiv_fetcher import summarize_text
 
 _JUDGE = make_judge()
+
+if describe_answer_model() == describe_eval_judge():
+    print(
+        "\n[WARNING] Eval answers and DeepEval judge use the same model "
+        f"({describe_eval_judge()}). Faithfulness and relevancy can be optimistically biased. "
+        "Prefer EVAL_JUDGE_MODEL different from OPENAI_MODEL, or EVAL_JUDGE=prometheus|claude.\n",
+        flush=True,
+    )
 
 
 def _score(metric, test_case: LLMTestCase) -> tuple[float, bool]:
@@ -246,13 +254,15 @@ def _print_eval_summary(
     baseline: dict | None,
 ) -> dict:
     """Print a copy-paste friendly block and return a JSON-serializable summary dict."""
-    payload: dict = {"judge": judge_label, "suites": {}}
+    answer_label = describe_answer_model()
+    payload: dict = {"judge": judge_label, "answer_model": answer_label, "suites": {}}
     lines = [
         "",
         "=" * 60,
         "EVAL_SUMMARY (copy into README or release notes)",
         "=" * 60,
         f"Judge (configured): {judge_label}",
+        f"Answer model (RAG / baseline): {answer_label}",
     ]
 
     if summarizer:
