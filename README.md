@@ -184,6 +184,11 @@ Run the HTTP API:
 uv run uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
+API prerequisites:
+- Set `OPENAI_API_KEY` in `.env`, or
+- Run with local Ollama (`docker compose --profile local-llm up --build`) and ensure Ollama is reachable.
+- Without either provider, `/chat` and `/chat/stream` will return provider connection errors.
+
 One-line chat request:
 
 ```bash
@@ -206,6 +211,15 @@ Run with optional local Ollama sidecar:
 
 ```bash
 docker compose --profile local-llm up --build
+```
+
+Convenience commands (optional):
+
+```bash
+make lint
+make test
+make api
+make ci-test
 ```
 
 ```
