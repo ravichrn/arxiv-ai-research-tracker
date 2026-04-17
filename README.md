@@ -118,7 +118,7 @@ A per-topic timestamp registry ensures only newly published papers are fetched o
 `summarize`, `clarify`, `compare`, `tag`, `digest`, `diagram`, and `figures` stream tokens to the terminal as the model generates. `rag`, `ingestion`, and `list` print after completion.
 
 ### Persistent Conversation Memory
-State is checkpointed to SQLite across restarts. Type `new session` or `reset` to start a fresh thread.
+State is checkpointed to SQLite across restarts when `langgraph-checkpoint-sqlite` is available. If not available in your runtime, the app still runs but thread memory is non-persistent. Type `new session` or `reset` to start a fresh thread.
 
 ### Guardrails
 All user input and retrieved content passes through a sanitization layer — detects prompt injection, jailbreak patterns, role overrides, and data exfiltration using 20+ regex rules with Unicode normalization.
@@ -165,6 +165,8 @@ git clone https://github.com/ravichrn/arxiv-ai-research-tracker.git
 cd arxiv-ai-research-tracker
 uv sync
 ```
+
+Use Python 3.13 for local development (the current dependency set is not stable on Python 3.14).
 
 Create a `.env` file using `.env.example` as a reference.
 
@@ -239,6 +241,8 @@ uv run python -m evaluation.run_eval --suite rag            # RAG only
 uv run python -m evaluation.run_eval --suite adversarial    # adversarial only
 uv run pytest evaluation/                                   # pytest suite
 ```
+
+`evaluation/test_api.py` is a fast API-layer unit suite that stubs heavy supervisor/runtime dependencies; it validates endpoint behavior and error handling without requiring live model/provider connectivity.
 
 **Judge model** — set `EVAL_JUDGE` in `.env`:
 

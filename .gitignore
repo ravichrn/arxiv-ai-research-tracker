@@ -196,3 +196,8 @@ cython_debug/
 
 #Claude context
 CLAUDE.md
+
+# Local runtime state (do not commit)
+databases/agent_memory.db
+databases/agent_memory.db-shm
+databases/agent_memory.db-wal
