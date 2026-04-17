@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,7 +11,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from databases.stores import llm_fast, papers_store
+from databases.stores import invalidate_fts_index, llm_fast, papers_store
 
 LAST_RUN_FILE = Path(__file__).parent.parent / "databases" / "last_run.txt"
 TOPICS = ["cs.AI", "cs.LG", "cs.CL", "cs.RO"]
@@ -70,7 +71,7 @@ def _load_last_run() -> dict:
         return {}
 
 
-def _get_since(topic: str) -> datetime:
+def _get_since(topic: str, registry: dict) -> datetime:
     """Return the earliest datetime we should fetch for *topic*.
 
     Precedence (newest wins):
@@ -78,7 +79,6 @@ def _get_since(topic: str) -> datetime:
     2. Topic-specific key (e.g. ``"cs.AI"``).
     If neither exists, fall back to 14 days ago.
     """
-    registry = _load_last_run()
     fallback = datetime.now(UTC) - timedelta(days=14)
 
     candidates: list[datetime] = []
@@ -138,10 +138,10 @@ def _arxiv_id(result: arxiv.Result) -> str:
 def get_paper_by_title(title: str) -> dict | None:
     """Look up a paper from papers_raw.jsonl by exact title (case-insensitive)."""
     title_lower = title.lower().strip()
-    for paper in _load_papers_cache():
-        if paper.get("title", "").lower().strip() == title_lower:
-            return paper
-    return None
+    _load_papers_cache()
+    if _papers_title_index is None:
+        return None
+    return _papers_title_index.get(title_lower)
 
 
 def list_papers() -> str:
@@ -175,12 +175,16 @@ def get_paper_by_arxiv_id(arxiv_id: str) -> dict | None:
     Matches on both versioned ('2301.12345v2') and base ('2301.12345') forms.
     Returns the raw paper dict, or None if not found.
     """
-    base_id = arxiv_id.split("v")[0]
-    for paper in _load_papers_cache():
-        url = paper.get("arxiv_id", "") or paper.get("url", "")
-        if arxiv_id in url or base_id in url:
-            return paper
-    return None
+    arxiv_id = arxiv_id.strip()
+    if not arxiv_id:
+        return None
+
+    _load_papers_cache()
+    if _papers_arxiv_index is None or _papers_base_arxiv_index is None:
+        return None
+
+    base_id = arxiv_id.split("v", 1)[0]
+    return _papers_arxiv_index.get(arxiv_id) or _papers_base_arxiv_index.get(base_id)
 
 
 def _print_paper(result: arxiv.Result) -> None:
@@ -207,6 +211,47 @@ _DB_DIR = Path(__file__).parent.parent / "databases"
 # Invalidated after every write in fetch_papers so new papers are visible immediately.
 _papers_cache: list[dict] | None = None
 
+# Lookup indexes built from _papers_cache for O(1) retrieval.
+_papers_title_index: dict[str, dict] | None = None
+_papers_arxiv_index: dict[str, dict] | None = None
+_papers_base_arxiv_index: dict[str, dict] | None = None
+
+
+def _build_papers_indexes(papers: list[dict]) -> None:
+    """Build in-memory indexes for quick paper lookup."""
+    global _papers_title_index, _papers_arxiv_index, _papers_base_arxiv_index
+
+    title_index: dict[str, dict] = {}
+    arxiv_index: dict[str, dict] = {}
+    base_index: dict[str, dict] = {}
+
+    arxiv_id_re = re.compile(r"/(?:abs|pdf)/(\d{4}\.\d{4,5}(?:v\d+)?)(?:\D|$)")
+
+    for paper in papers:
+        title = str(paper.get("title", "")).strip()
+        if title:
+            key = title.lower()
+            if key not in title_index:
+                title_index[key] = paper
+
+        arxiv_id = str(paper.get("arxiv_id", "")).strip()
+        if not arxiv_id:
+            url = str(paper.get("url", "")).strip()
+            m = arxiv_id_re.search(url)
+            if m:
+                arxiv_id = m.group(1)
+
+        if arxiv_id:
+            if arxiv_id not in arxiv_index:
+                arxiv_index[arxiv_id] = paper
+            base = arxiv_id.split("v", 1)[0]
+            if base not in base_index:
+                base_index[base] = paper
+
+    _papers_title_index = title_index
+    _papers_arxiv_index = arxiv_index
+    _papers_base_arxiv_index = base_index
+
 
 def _load_papers_cache() -> list[dict]:
     global _papers_cache
@@ -214,6 +259,7 @@ def _load_papers_cache() -> list[dict]:
         return _papers_cache
     if not _RAW_PAPERS_FILE.exists():
         _papers_cache = []
+        _build_papers_indexes(_papers_cache)
         return _papers_cache
     papers = []
     for line in _RAW_PAPERS_FILE.read_text().splitlines():
@@ -224,12 +270,16 @@ def _load_papers_cache() -> list[dict]:
             except json.JSONDecodeError:
                 pass
     _papers_cache = papers
+    _build_papers_indexes(_papers_cache)
     return _papers_cache
 
 
 def _invalidate_papers_cache() -> None:
-    global _papers_cache
+    global _papers_cache, _papers_title_index, _papers_arxiv_index, _papers_base_arxiv_index
     _papers_cache = None
+    _papers_title_index = None
+    _papers_arxiv_index = None
+    _papers_base_arxiv_index = None
 
 
 def _load_raw_urls() -> set[str]:
@@ -246,6 +296,7 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
     topics = topics or list(TOPICS)
     fetched_all = set(topics) >= set(TOPICS)
     now_str = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    registry = _load_last_run()
 
     print(f"Fetching {len(topics)} topic(s)...")
 
@@ -253,7 +304,6 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
     raw_urls = _load_raw_urls()
     existing_urls = _fetch_existing_urls()
     known_urls = raw_urls | existing_urls
-    seen_ids: set[str] = set()
     new_count = 0
     new_papers: list[dict] = []
 
@@ -265,7 +315,7 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
             if i > 0:
                 time.sleep(3)  # arXiv recommended minimum between bulk requests
 
-            since = _get_since(topic)
+            since = _get_since(topic, registry)
             since_str = since.strftime("%Y%m%d%H%M%S")
             since_label = since.strftime("%Y-%m-%d %H:%M UTC")
             print(f"\n[{topic}] fetching since {since_label}...")
@@ -280,9 +330,8 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
             topic_count = 0
             try:
                 for result in _fetch_results(search):
-                    if result.entry_id in seen_ids or result.entry_id in known_urls:
+                    if result.entry_id in known_urls:
                         continue
-                    seen_ids.add(result.entry_id)
                     known_urls.add(result.entry_id)
                     paper = {
                         "arxiv_id": _arxiv_id(result),
@@ -507,5 +556,6 @@ def _embed_and_store(papers: list[dict]) -> int:
                 )
             )
     papers_store.add_documents(docs)
+    invalidate_fts_index(papers_store)  # force FTS rebuild on next hybrid_search
     print(f"Indexed {len(papers)} papers ({len(docs)} chunks) into vector store.")
     return len(papers)

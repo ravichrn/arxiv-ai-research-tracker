@@ -58,7 +58,6 @@ _INJECTION_PATTERNS: list[str] = [
     r"translate\s+(the\s+)?(above|previous|system)\s+(to|into)",
 ]
 
-_COMPILED = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in _INJECTION_PATTERNS]
 # Combined pattern for single-pass substitution in sanitize_retrieved.
 _COMBINED = re.compile(
     "|".join(_INJECTION_PATTERNS),
@@ -116,8 +115,7 @@ def validate_user_input(query: str) -> str:
 
     normalized = _normalize(query)
 
-    for pattern in _COMPILED:
-        if pattern.search(normalized):
-            raise InputRejected("Query contains a disallowed pattern and was rejected.")
+    if _COMBINED.search(normalized):
+        raise InputRejected("Query contains a disallowed pattern and was rejected.")
 
     return normalized
