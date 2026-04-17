@@ -2,10 +2,11 @@ import importlib
 import sys
 import types
 
+import pytest
 from fastapi.testclient import TestClient
 
 
-def _load_api_module():
+def _load_api_module(monkeypatch: pytest.MonkeyPatch):
     # Build minimal stubs so api.py can import without the full runtime stack.
     agents_pkg = types.ModuleType("agents")
     supervisor_mod = types.ModuleType("agents.supervisor")
@@ -29,29 +30,33 @@ def _load_api_module():
     sanitizer_mod.InputRejected = _InputRejected
     guardrails_pkg.sanitizer = sanitizer_mod
 
-    sys.modules["agents"] = agents_pkg
-    sys.modules["agents.supervisor"] = supervisor_mod
-    sys.modules["guardrails"] = guardrails_pkg
-    sys.modules["guardrails.sanitizer"] = sanitizer_mod
-    sys.modules.pop("api", None)
+    monkeypatch.setitem(sys.modules, "agents", agents_pkg)
+    monkeypatch.setitem(sys.modules, "agents.supervisor", supervisor_mod)
+    monkeypatch.setitem(sys.modules, "guardrails", guardrails_pkg)
+    monkeypatch.setitem(sys.modules, "guardrails.sanitizer", sanitizer_mod)
+    monkeypatch.delitem(sys.modules, "api", raising=False)
     return importlib.import_module("api")
 
 
-api = _load_api_module()
-client = TestClient(api.app)
+@pytest.fixture
+def api_module(monkeypatch: pytest.MonkeyPatch):
+    return _load_api_module(monkeypatch)
 
 
-def test_health_ok():
+def test_health_ok(api_module):
+    client = TestClient(api_module.app)
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
 
 
-def test_chat_success(monkeypatch):
+def test_chat_success(monkeypatch, api_module):
+    client = TestClient(api_module.app)
+
     def _fake_run(query: str, thread_id: str = "default") -> str:
         return f"ok:{thread_id}:{query}"
 
-    monkeypatch.setattr(api, "run_supervisor_once", _fake_run)
+    monkeypatch.setattr(api_module, "run_supervisor_once", _fake_run)
     resp = client.post(
         "/chat",
         json={"query": "find papers on diffusion models", "thread_id": "demo"},
@@ -64,22 +69,26 @@ def test_chat_success(monkeypatch):
     }
 
 
-def test_chat_rejected(monkeypatch):
+def test_chat_rejected(monkeypatch, api_module):
+    client = TestClient(api_module.app)
+
     def _fake_run(_query: str, thread_id: str = "default") -> str:
         raise ValueError("Query cannot be empty.")
 
-    monkeypatch.setattr(api, "run_supervisor_once", _fake_run)
+    monkeypatch.setattr(api_module, "run_supervisor_once", _fake_run)
     resp = client.post("/chat", json={"query": "x", "thread_id": "demo"})
     assert resp.status_code == 400
     assert "Query cannot be empty." in resp.json()["detail"]
 
 
-def test_chat_stream_done(monkeypatch):
+def test_chat_stream_done(monkeypatch, api_module):
+    client = TestClient(api_module.app)
+
     def _fake_stream(_query: str, thread_id: str = "default"):
         yield "hello"
         yield "world"
 
-    monkeypatch.setattr(api, "stream_supervisor_once", _fake_stream)
+    monkeypatch.setattr(api_module, "stream_supervisor_once", _fake_stream)
     with client.stream(
         "POST", "/chat/stream", json={"query": "hello", "thread_id": "demo"}
     ) as resp:
