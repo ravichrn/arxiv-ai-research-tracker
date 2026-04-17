@@ -176,6 +176,18 @@ Create a `.env` file using `.env.example` as a reference.
 uv run python main.py
 ```
 
+Run the HTTP API:
+
+```bash
+uv run uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+One-line chat request:
+
+```bash
+curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query":"find papers on diffusion models","thread_id":"demo"}'
+```
+
 ```
 [Supervisor Ready] Fetch, search, summarize, compare, tag, digest, or diagram papers.
 Examples:
