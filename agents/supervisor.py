@@ -1088,41 +1088,50 @@ _STREAMING_NODES = {"summarize", "clarify", "compare", "tag", "digest", "diagram
 _DB_DIR = Path(__file__).parent.parent / "databases"
 
 
+def _validate_query(query: str) -> str:
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        raise ValueError("Query cannot be empty.")
+    return validate_user_input(cleaned_query)
+
+
+def _build_turn_initial_state(validated_query: str, has_history: bool) -> dict:
+    initial_msgs = (
+        [HumanMessage(content=validated_query)]
+        if has_history
+        else [_SYSTEM_MESSAGE, HumanMessage(content=validated_query)]
+    )
+    return {
+        "messages": initial_msgs,
+        "intent": "",
+        "resolved_topics": [],
+        "pending_chain": [],
+        "rag_query": "",
+        "last_result": "",
+        "last_retrieval_context": [],
+        "pinned_paper": "",
+        "pinned_papers": [],
+    }
+
+
+def _prepare_supervisor_turn(checkpointer, query: str, thread_id: str) -> tuple[dict, dict]:
+    validated_query = _validate_query(query)
+    config: dict = {"configurable": {"thread_id": thread_id}}
+    checkpoint = checkpointer.get(config)
+    has_history = checkpoint is not None
+    initial_state = _build_turn_initial_state(validated_query, has_history)
+    return config, initial_state
+
+
 def run_supervisor_once(query: str, thread_id: str = "default") -> str:
     """Run one validated supervisor turn and return the final text response.
 
     Designed for non-interactive callers (e.g. API endpoints) that need a
     single request/response execution path while preserving thread memory.
     """
-    cleaned_query = query.strip()
-    if not cleaned_query:
-        raise ValueError("Query cannot be empty.")
-
-    validated_query = validate_user_input(cleaned_query)
-
     with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
         graph = _build_supervisor_graph(checkpointer)
-        config: dict = {"configurable": {"thread_id": thread_id}}
-
-        checkpoint = checkpointer.get(config)
-        has_history = checkpoint is not None
-        initial_msgs = (
-            [HumanMessage(content=validated_query)]
-            if has_history
-            else [_SYSTEM_MESSAGE, HumanMessage(content=validated_query)]
-        )
-
-        initial_state = {
-            "messages": initial_msgs,
-            "intent": "",
-            "resolved_topics": [],
-            "pending_chain": [],
-            "rag_query": "",
-            "last_result": "",
-            "last_retrieval_context": [],
-            "pinned_paper": "",
-            "pinned_papers": [],
-        }
+        config, initial_state = _prepare_supervisor_turn(checkpointer, query, thread_id)
         result = graph.invoke(initial_state, config=config)
 
     last_result = str(result.get("last_result", "")).strip()
@@ -1137,35 +1146,9 @@ def run_supervisor_once(query: str, thread_id: str = "default") -> str:
 
 def stream_supervisor_once(query: str, thread_id: str = "default") -> Iterator[str]:
     """Stream one supervisor turn as text chunks for API SSE responses."""
-    cleaned_query = query.strip()
-    if not cleaned_query:
-        raise ValueError("Query cannot be empty.")
-
-    validated_query = validate_user_input(cleaned_query)
-
     with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
         graph = _build_supervisor_graph(checkpointer)
-        config: dict = {"configurable": {"thread_id": thread_id}}
-
-        checkpoint = checkpointer.get(config)
-        has_history = checkpoint is not None
-        initial_msgs = (
-            [HumanMessage(content=validated_query)]
-            if has_history
-            else [_SYSTEM_MESSAGE, HumanMessage(content=validated_query)]
-        )
-
-        initial_state = {
-            "messages": initial_msgs,
-            "intent": "",
-            "resolved_topics": [],
-            "pending_chain": [],
-            "rag_query": "",
-            "last_result": "",
-            "last_retrieval_context": [],
-            "pinned_paper": "",
-            "pinned_papers": [],
-        }
+        config, initial_state = _prepare_supervisor_turn(checkpointer, query, thread_id)
 
         streamed_any = False
         final_result = ""
