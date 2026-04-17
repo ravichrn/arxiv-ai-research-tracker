@@ -42,6 +42,8 @@ dependencies = [
     "pydantic",
     "typing-extensions",
     "langgraph-checkpoint-sqlite>=3.0.3",
+    "fastapi",
+    "uvicorn",
 ]
 
 [project.scripts]
