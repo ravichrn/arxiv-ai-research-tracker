@@ -28,6 +28,7 @@ def _load_api_module(monkeypatch: pytest.MonkeyPatch):
         pass
 
     sanitizer_mod.InputRejected = _InputRejected
+    sanitizer_mod.validate_user_input = lambda q: q
     guardrails_pkg.sanitizer = sanitizer_mod
 
     monkeypatch.setitem(sys.modules, "agents", agents_pkg)
@@ -97,3 +98,14 @@ def test_chat_stream_done(monkeypatch, api_module):
     assert "data: hello" in body
     assert "data: world" in body
     assert "event: done" in body
+
+
+def test_chat_stream_invalid_input_returns_400(monkeypatch, api_module):
+    client = TestClient(api_module.app)
+
+    def _reject(_query: str):
+        raise ValueError("Query cannot be empty.")
+
+    monkeypatch.setattr(api_module, "validate_user_input", _reject)
+    resp = client.post("/chat/stream", json={"query": "   ", "thread_id": "demo"})
+    assert resp.status_code == 400

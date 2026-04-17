@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.supervisor import run_supervisor_once, stream_supervisor_once
-from guardrails.sanitizer import InputRejected
+from guardrails.sanitizer import InputRejected, validate_user_input
 
 app = FastAPI(title="arXiv AI Research Tracker API", version="0.1.0")
 
@@ -94,9 +94,20 @@ def chat(req: ChatRequest) -> ChatResponse:
     },
 )
 def chat_stream(req: ChatRequest) -> StreamingResponse:
+    # Align with /chat by rejecting invalid input before opening the SSE stream.
+    cleaned_query = req.query.strip()
+    if not cleaned_query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    try:
+        validated_query = validate_user_input(cleaned_query)
+    except InputRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     def event_stream() -> Iterator[str]:
         try:
-            for chunk in stream_supervisor_once(req.query, thread_id=req.thread_id):
+            for chunk in stream_supervisor_once(validated_query, thread_id=req.thread_id):
                 # SSE format: one event chunk per generated token/message piece.
                 safe_chunk = chunk.replace("\r", "")
                 for line in safe_chunk.split("\n"):
