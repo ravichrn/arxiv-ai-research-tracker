@@ -201,6 +201,9 @@ CLAUDE.md
 databases/agent_memory.db
 databases/agent_memory.db-shm
 databases/agent_memory.db-wal
+databases/llm_cache.db
+databases/embedding_cache/
+databases/lancedb/
 
 # Local Cursor session notes (do not commit)
 CURSOR_CHANGELOG.md

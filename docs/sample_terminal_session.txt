@@ -1,0 +1,39 @@
+# Representative terminal session (illustrative)
+
+Below is an abbreviated transcript of the interactive supervisor. Your exact
+output will vary with corpus, models, and prompts.
+
+---
+
+[Supervisor Ready] Fetch, search, summarize, compare, tag, digest, or diagram papers.
+Examples:
+  - 'fetch recent robotics papers'
+  - 'find papers on diffusion models'
+  ...
+
+You: fetch recent cs.CL papers
+
+  [Supervisor] intent=fetch, chain=[], topics=['cs.CL']
+  [Supervisor] Fetching topics: cs.CL
+Fetched and indexed 12 new paper(s) for: cs.CL. You can now search them.
+
+You: find papers on retrieval-augmented generation
+
+  [Supervisor] intent=rag, chain=[], topics=[]
+  [Supervisor] RAG query: find papers on retrieval-augmented generation
+
+Agent: Retrieval-augmented generation (RAG) combines a retriever with a generator so
+that answers are grounded in retrieved documents ...
+
+Sources:
+  [2401.00000] Example Paper on RAG for Open QA
+  [2305.00000] Dense Passage Retrieval for Open-Domain QA
+
+You: summarize recent cs.CL papers
+
+Agent: - Paper A: focuses on scaling laws for instruction-tuned models ...
+     - Paper B: proposes a new preference optimization objective ...
+     (tokens stream inline in the real CLI)
+
+You: exit
+Exiting. Goodbye!

@@ -148,9 +148,12 @@ arxiv-ai-research-tracker/
 │   └── sanitizer.py           # Prompt injection prevention
 ├── evaluation/
 │   ├── datasets.py            # Test cases (summarizer + RAG)
+│   ├── eval_metrics_snapshot.json  # Pinned mean scores for README (regenerate locally)
 │   ├── run_eval.py            # Standalone eval runner
 │   ├── test_summarizer.py     # pytest — hallucination + summarization metrics
 │   └── test_rag.py            # pytest — faithfulness + relevancy metrics
+├── docs/
+│   └── sample_terminal_session.txt  # Illustrative CLI transcript
 ├── prompts/
 │   └── summarize.txt          # Summarization prompt template
 └── pyproject.toml             # uv-managed dependencies
@@ -247,14 +250,61 @@ Type `exit` or `quit` to stop. Use `ollama pull llama3.2` for local summarizatio
 
 ---
 
+## Sample terminal session
+
+The supervisor prints routing logs, then either streams model tokens (for long-form
+nodes) or prints a final block when the turn completes. A longer illustrative
+transcript lives in [`docs/sample_terminal_session.txt`](docs/sample_terminal_session.txt).
+
+```text
+You: fetch recent cs.CL papers
+  [Supervisor] intent=fetch, chain=[], topics=['cs.CL']
+Fetched and indexed 12 new paper(s) for: cs.CL. You can now search them.
+
+You: find papers on retrieval-augmented generation
+  [Supervisor] intent=rag, chain=[], topics=[]
+Agent: ... grounded answer with inline citations ...
+
+You: summarize recent cs.CL papers
+Agent: - Paper A: ...   (tokens stream here in the real CLI)
+
+You: exit
+```
+
+---
+
 ## Evaluation
+
+### Reported benchmark scores (pinned snapshot)
+
+These means come from a single local run of `evaluation.run_eval` (DeepEval
+metrics). Raw numbers and metadata are committed in
+[`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json).
+Re-run and replace that file when you change models, judges, or corpus.
+
+| Suite | Faithfulness (mean) | Answer relevancy (mean) | Cases scored | Judge |
+| --- | ---: | ---: | ---: | --- |
+| RAG (`RAG_CASES`) | **0.907** | **0.728** | 10 | `openai/gpt-4o-mini` |
+| Adversarial RAG (`ADVERSARIAL_RAG_CASES`) | **0.867** | **0.407** | 3 | `openai/gpt-4o-mini` |
+
+Notes:
+- Hallucination on the summarizer suite was not measured in this snapshot because
+  the LanceDB table had no rows for the random summarizer sample path at run time
+  (run `main.py` / fetch first to populate).
+- Adversarial relevancy is often **expected to be low** when retrieval is intentionally
+  off-topic; faithfulness should stay high if the model refuses to invent facts.
 
 ```bash
 uv run python -m evaluation.run_eval                        # all suites
 uv run python -m evaluation.run_eval --suite rag            # RAG only
 uv run python -m evaluation.run_eval --suite adversarial    # adversarial only
+# After a successful run, capture aggregates for README / CI artifacts:
+EVAL_JUDGE=openai EVAL_JUDGE_MODEL=gpt-4o-mini uv run python -m evaluation.run_eval --suite all --write-metrics evaluation/eval_metrics_snapshot.json
 uv run pytest evaluation/                                   # pytest suite
 ```
+
+At the end of a successful `run_eval` run, the runner prints an `EVAL_SUMMARY`
+block you can paste into release notes or refresh the table above.
 
 `evaluation/test_api.py` is a fast API-layer unit suite that stubs heavy supervisor/runtime dependencies; it validates endpoint behavior and error handling without requiring live model/provider connectivity.
 
