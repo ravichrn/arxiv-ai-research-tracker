@@ -282,12 +282,19 @@ metrics). Raw numbers and metadata are committed in
 [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json).
 Re-run and replace that file when you change models, judges, or corpus.
 
+Faithfulness and relevancy use the **judge** LLM, not deterministic code. If the
+judge is the **same** model as the one that wrote the answers (`OPENAI_MODEL`),
+scores tend to look unrealistically high; this repo defaults the OpenAI judge to
+**`gpt-4o`** when `EVAL_JUDGE=openai` so a typical **`gpt-5.4`** agent is graded
+cross-model. Use `EVAL_JUDGE=prometheus` or `claude` for stronger separation.
+
 | Suite | Faithfulness (mean) | Answer relevancy (mean) | Cases scored | Judge |
 | --- | ---: | ---: | ---: | --- |
-| RAG (`RAG_CASES`) | **0.907** | **0.728** | 10 | `openai/gpt-4o-mini` |
-| Adversarial RAG (`ADVERSARIAL_RAG_CASES`) | **0.867** | **0.407** | 3 | `openai/gpt-4o-mini` |
+| RAG (`RAG_CASES`) | **0.921** | **0.712** | 10 | `openai/gpt-4o` |
+| Adversarial RAG (`ADVERSARIAL_RAG_CASES`) | **1.000** | **0.362** | 3 | `openai/gpt-4o` |
 
 Notes:
+- Pinned means match [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json). Captured with **`gpt-4o`** judging answers from **`gpt-5.4`** (`OPENAI_MODEL`). If `.env` sets `EVAL_JUDGE_MODEL` equal to `OPENAI_MODEL`, scores skew high — override on the CLI (see below) or use `EVAL_JUDGE=prometheus|claude`. Re-run with `--write-metrics` after changing judges or corpus.
 - Hallucination on the summarizer suite was not measured in this snapshot because
   the LanceDB table had no rows for the random summarizer sample path at run time
   (run `main.py` / fetch first to populate).
@@ -298,8 +305,8 @@ Notes:
 uv run python -m evaluation.run_eval                        # all suites
 uv run python -m evaluation.run_eval --suite rag            # RAG only
 uv run python -m evaluation.run_eval --suite adversarial    # adversarial only
-# After a successful run, capture aggregates for README / CI artifacts:
-EVAL_JUDGE=openai EVAL_JUDGE_MODEL=gpt-4o-mini uv run python -m evaluation.run_eval --suite all --write-metrics evaluation/eval_metrics_snapshot.json
+# After a successful run, capture aggregates for README / CI artifacts (pin gpt-4o judge if .env uses gpt-5.4 for both):
+EVAL_JUDGE=openai EVAL_JUDGE_MODEL=gpt-4o uv run python -m evaluation.run_eval --suite all --write-metrics evaluation/eval_metrics_snapshot.json
 uv run pytest evaluation/                                   # pytest suite
 ```
 
@@ -314,7 +321,7 @@ block you can paste into release notes or refresh the table above.
 |---|---|---|
 | `prometheus` | Prometheus 2 via Ollama | Free (local) |
 | `claude` | `claude-opus-4-6` | ~$6–10/run |
-| `openai` | `gpt-4o` (default) | ~$1–2/run |
+| `openai` | `gpt-4o` (default judge; differs from typical agent model) | ~$1–3/run |
 
 ---
 

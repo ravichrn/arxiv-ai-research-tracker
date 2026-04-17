@@ -1,20 +1,21 @@
 {
-  "judge": "openai/gpt-4o-mini",
+  "judge": "openai/gpt-4o",
+  "answer_model": "openai/gpt-5.4",
   "suites": {
     "rag": {
-      "faithfulness_mean": 0.9070995670995672,
-      "relevancy_mean": 0.7283333333333333,
+      "faithfulness_mean": 0.9206349206349206,
+      "relevancy_mean": 0.712062509214212,
       "n_scored": 10,
       "n_skipped": 0
     },
     "adversarial": {
-      "faithfulness_mean": 0.8666666666666667,
-      "relevancy_mean": 0.40740740740740744,
+      "faithfulness_mean": 1.0,
+      "relevancy_mean": 0.36195286195286197,
       "n_scored": 3,
       "n_skipped": 0
     },
     "baseline_no_context": {
-      "relevancy_mean": 0.9904761904761905,
+      "relevancy_mean": 0.9947368421052631,
       "n": 5
     }
   }
