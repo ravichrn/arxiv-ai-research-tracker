@@ -1,0 +1,21 @@
+{
+  "judge": "openai/gpt-4o-mini",
+  "suites": {
+    "rag": {
+      "faithfulness_mean": 0.9070995670995672,
+      "relevancy_mean": 0.7283333333333333,
+      "n_scored": 10,
+      "n_skipped": 0
+    },
+    "adversarial": {
+      "faithfulness_mean": 0.8666666666666667,
+      "relevancy_mean": 0.40740740740740744,
+      "n_scored": 3,
+      "n_skipped": 0
+    },
+    "baseline_no_context": {
+      "relevancy_mean": 0.9904761904761905,
+      "n": 5
+    }
+  }
+}

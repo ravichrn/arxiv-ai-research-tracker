@@ -51,6 +51,24 @@ class PrometheusOllamaJudge(DeepEvalBaseLLM):
         return self.generate(prompt)
 
 
+def describe_eval_judge() -> str:
+    """Human-readable label for which judge backend `make_judge()` will select."""
+    choice = os.getenv("EVAL_JUDGE", "").lower()
+    if not choice:
+        choice = "claude" if os.getenv("ANTHROPIC_API_KEY") else "openai"
+
+    if choice == "prometheus":
+        model = os.getenv("PROMETHEUS_MODEL", "vicgalle/prometheus-7b-v2.0")
+        return f"prometheus-ollama/{model}"
+
+    if choice == "claude":
+        model = os.getenv("EVAL_JUDGE_MODEL_CLAUDE", "claude-opus-4-6")
+        return f"anthropic/{model}"
+
+    model = os.getenv("EVAL_JUDGE_MODEL", "gpt-4o")
+    return f"openai/{model}"
+
+
 def make_judge():
     """Return the appropriate judge for DeepEval metrics based on EVAL_JUDGE env var.
 
