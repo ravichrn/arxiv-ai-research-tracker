@@ -22,6 +22,7 @@ Sub-agents:
 
 import json
 import re as _re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
 
@@ -1132,6 +1133,58 @@ def run_supervisor_once(query: str, thread_id: str = "default") -> str:
     if messages:
         return str(messages[-1].content)
     return ""
+
+
+def stream_supervisor_once(query: str, thread_id: str = "default") -> Iterator[str]:
+    """Stream one supervisor turn as text chunks for API SSE responses."""
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        raise ValueError("Query cannot be empty.")
+
+    validated_query = validate_user_input(cleaned_query)
+
+    with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
+        graph = _build_supervisor_graph(checkpointer)
+        config: dict = {"configurable": {"thread_id": thread_id}}
+
+        checkpoint = checkpointer.get(config)
+        has_history = checkpoint is not None
+        initial_msgs = (
+            [HumanMessage(content=validated_query)]
+            if has_history
+            else [_SYSTEM_MESSAGE, HumanMessage(content=validated_query)]
+        )
+
+        initial_state = {
+            "messages": initial_msgs,
+            "intent": "",
+            "resolved_topics": [],
+            "pending_chain": [],
+            "rag_query": "",
+            "last_result": "",
+            "last_retrieval_context": [],
+            "pinned_paper": "",
+            "pinned_papers": [],
+        }
+
+        streamed_any = False
+        final_result = ""
+        for event_type, event_data in graph.stream(
+            initial_state, config=config, stream_mode=["values", "messages"]
+        ):
+            if event_type == "messages":
+                chunk, meta = event_data
+                node = meta.get("langgraph_node", "")
+                if node in _STREAMING_NODES and hasattr(chunk, "content") and chunk.content:
+                    streamed_any = True
+                    yield str(chunk.content)
+            elif event_type == "values":
+                r = event_data.get("last_result", "")
+                if r:
+                    final_result = str(r)
+
+        if not streamed_any and final_result:
+            yield final_result
 
 
 def launch_supervisor() -> None:
