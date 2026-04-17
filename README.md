@@ -19,6 +19,10 @@ Natural language routing to the right sub-agent automatically:
 - *"Daily digest"* or *"Digest last 14 days"* → newsletter-style digest with optional email delivery
 - *"Diagram #2504.08123"* → Mermaid flowchart of the paper's methodology
 - *"Get figures from #2504.08123"* → extracts real images/figures from the paper
+- *"Export saved --bibtex"* → deterministic BibTeX/CSV export of saved papers (no LLM)
+- *"Find papers on LLMs then explain"* → search + show which sources were retrieved
+- *"Save tag #2504.08123 diffusion"* / *"Show tags #2504.08123"* → store and view user tags/notes per paper
+- *"Trends last 14 days"* → rising arXiv categories over two adjacent time windows (no LLM)
 - *"Fetch new ML papers then find the best ones on LLMs"* → chains fetch + search in one command
 
 ### Self-RAG Agent
@@ -134,6 +138,10 @@ arxiv-ai-research-tracker/
 │   └── arxiv_fetcher.py       # arXiv fetching, incremental sync, S2 enrichment, figure extraction
 ├── databases/
 │   ├── stores.py              # LanceDB stores, hybrid search, LLM singletons, caching
+│   ├── export_utils.py        # Deterministic BibTeX/CSV export (no LLM)
+│   ├── interest_rerank.py     # Interest-aware reranking via saved tags
+│   ├── saved_metadata.py      # SQLite side-table for user tags/notes
+│   ├── trends_utils.py        # Category trend analysis over time windows
 │   ├── papers_raw.jsonl       # NDJSON cache of all fetched paper metadata
 │   └── last_run.txt           # Per-topic fetch timestamps (JSON)
 ├── guardrails/
@@ -180,6 +188,10 @@ Examples:
   - 'daily digest'
   - 'diagram #2504.08123'
   - 'get figures from #2504.08123'
+  - 'export saved --bibtex'
+  - 'save tag #2504.08123 diffusion'
+  - 'trends last 14 days'
+  - 'find papers on LLMs then explain'
   - 'fetch NLP papers then find the best on transformers'
 
 You:
