@@ -59,6 +59,7 @@ from ingestion.arxiv_fetcher import (
 )
 
 _MAX_CHAIN_STEPS = 3
+_CHECKPOINTER_WARNED = False
 
 _TOPIC_ALIASES: dict[str, str] = {
     "ai": "cs.AI",
@@ -1127,6 +1128,17 @@ def _prepare_supervisor_turn(checkpointer, query: str, thread_id: str) -> tuple[
     return config, initial_state
 
 
+def _warn_no_checkpointer() -> None:
+    global _CHECKPOINTER_WARNED
+    if _CHECKPOINTER_WARNED:
+        return
+    print(
+        "  [Supervisor] WARNING: SQLite checkpointer unavailable; "
+        "running without persistent thread memory."
+    )
+    _CHECKPOINTER_WARNED = True
+
+
 def run_supervisor_once(query: str, thread_id: str = "default") -> str:
     """Run one validated supervisor turn and return the final text response.
 
@@ -1134,6 +1146,7 @@ def run_supervisor_once(query: str, thread_id: str = "default") -> str:
     single request/response execution path while preserving thread memory.
     """
     if SqliteSaver is None:
+        _warn_no_checkpointer()
         graph = _build_supervisor_graph(checkpointer=None)
         validated_query = _validate_query(query)
         initial_state = _build_turn_initial_state(validated_query, has_history=False)
@@ -1178,6 +1191,7 @@ def stream_supervisor_once(query: str, thread_id: str = "default") -> Iterator[s
             yield final_result
 
     if SqliteSaver is None:
+        _warn_no_checkpointer()
         graph = _build_supervisor_graph(checkpointer=None)
         validated_query = _validate_query(query)
         initial_state = _build_turn_initial_state(validated_query, has_history=False)
