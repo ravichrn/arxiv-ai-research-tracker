@@ -1087,6 +1087,53 @@ _STREAMING_NODES = {"summarize", "clarify", "compare", "tag", "digest", "diagram
 _DB_DIR = Path(__file__).parent.parent / "databases"
 
 
+def run_supervisor_once(query: str, thread_id: str = "default") -> str:
+    """Run one validated supervisor turn and return the final text response.
+
+    Designed for non-interactive callers (e.g. API endpoints) that need a
+    single request/response execution path while preserving thread memory.
+    """
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        raise ValueError("Query cannot be empty.")
+
+    validated_query = validate_user_input(cleaned_query)
+
+    with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
+        graph = _build_supervisor_graph(checkpointer)
+        config: dict = {"configurable": {"thread_id": thread_id}}
+
+        checkpoint = checkpointer.get(config)
+        has_history = checkpoint is not None
+        initial_msgs = (
+            [HumanMessage(content=validated_query)]
+            if has_history
+            else [_SYSTEM_MESSAGE, HumanMessage(content=validated_query)]
+        )
+
+        initial_state = {
+            "messages": initial_msgs,
+            "intent": "",
+            "resolved_topics": [],
+            "pending_chain": [],
+            "rag_query": "",
+            "last_result": "",
+            "last_retrieval_context": [],
+            "pinned_paper": "",
+            "pinned_papers": [],
+        }
+        result = graph.invoke(initial_state, config=config)
+
+    last_result = str(result.get("last_result", "")).strip()
+    if last_result:
+        return last_result
+
+    messages = result.get("messages", [])
+    if messages:
+        return str(messages[-1].content)
+    return ""
+
+
 def launch_supervisor() -> None:
     print("\n[Supervisor Ready] Fetch, search, summarize, compare, tag, digest, or diagram papers.")
     print("Examples:")
