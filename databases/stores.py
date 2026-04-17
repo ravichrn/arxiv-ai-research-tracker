@@ -31,7 +31,7 @@ _EMBEDDING_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days
 
 
 class _CachedEmbeddings(Embeddings):
-    _cache: diskcache.Cache | None  # type: ignore[name-defined]
+    _cache: "diskcache.Cache | None"  # type: ignore[name-defined]
     _base: Embeddings | None
 
     def __init__(self):

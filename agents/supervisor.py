@@ -27,10 +27,14 @@ from pathlib import Path
 from typing import Annotated
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
+
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+except ImportError:  # pragma: no cover - depends on local langgraph install extras
+    SqliteSaver = None  # type: ignore[assignment]
 
 from agents.runner import rag_graph
 from agents.tools import _format_docs
@@ -1129,10 +1133,16 @@ def run_supervisor_once(query: str, thread_id: str = "default") -> str:
     Designed for non-interactive callers (e.g. API endpoints) that need a
     single request/response execution path while preserving thread memory.
     """
-    with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
-        graph = _build_supervisor_graph(checkpointer)
-        config, initial_state = _prepare_supervisor_turn(checkpointer, query, thread_id)
-        result = graph.invoke(initial_state, config=config)
+    if SqliteSaver is None:
+        graph = _build_supervisor_graph(checkpointer=None)
+        validated_query = _validate_query(query)
+        initial_state = _build_turn_initial_state(validated_query, has_history=False)
+        result = graph.invoke(initial_state, config=None)
+    else:
+        with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
+            graph = _build_supervisor_graph(checkpointer)
+            config, initial_state = _prepare_supervisor_turn(checkpointer, query, thread_id)
+            result = graph.invoke(initial_state, config=config)
 
     last_result = str(result.get("last_result", "")).strip()
     if last_result:
@@ -1146,10 +1156,8 @@ def run_supervisor_once(query: str, thread_id: str = "default") -> str:
 
 def stream_supervisor_once(query: str, thread_id: str = "default") -> Iterator[str]:
     """Stream one supervisor turn as text chunks for API SSE responses."""
-    with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
-        graph = _build_supervisor_graph(checkpointer)
-        config, initial_state = _prepare_supervisor_turn(checkpointer, query, thread_id)
 
+    def _stream(graph, initial_state, config) -> Iterator[str]:
         streamed_any = False
         final_result = ""
         for event_type, event_data in graph.stream(
@@ -1168,6 +1176,18 @@ def stream_supervisor_once(query: str, thread_id: str = "default") -> Iterator[s
 
         if not streamed_any and final_result:
             yield final_result
+
+    if SqliteSaver is None:
+        graph = _build_supervisor_graph(checkpointer=None)
+        validated_query = _validate_query(query)
+        initial_state = _build_turn_initial_state(validated_query, has_history=False)
+        yield from _stream(graph, initial_state, config=None)
+        return
+
+    with SqliteSaver.from_conn_string(str(_DB_DIR / "agent_memory.db")) as checkpointer:
+        graph = _build_supervisor_graph(checkpointer)
+        config, initial_state = _prepare_supervisor_turn(checkpointer, query, thread_id)
+        yield from _stream(graph, initial_state, config=config)
 
 
 def launch_supervisor() -> None:
