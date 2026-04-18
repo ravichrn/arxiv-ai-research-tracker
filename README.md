@@ -1,127 +1,70 @@
 # arxiv-ai-research-tracker
 
-A research assistant that fetches the latest AI papers from arXiv, indexes them into a searchable vector store, and lets you explore them through a conversational multi-agent interface — all from the terminal.
+A research assistant that fetches the latest AI papers from arXiv, indexes them into a searchable vector store, and lets you explore them through a conversational multi-agent interface — from the **terminal** or over **HTTP**.
+
+**Stack & keywords:** *arXiv ingestion · Semantic Scholar batch enrichment · LanceDB + hybrid retrieval (dense embeddings + BM25) · cross-encoder reranking · interest-aware rerank from saved tags · LangGraph **Self-RAG** (tool retrieval → **grade** irrelevant chunks → generate → **hallucination check** → capped **query rewrite**) · **LangChain** tools · **LangGraph** supervisor (NL routing + command chains) · **FastAPI** REST + **SSE** streaming · **Pydantic** request models · **DeepEval** faithfulness / relevancy (OpenAI / Claude / Prometheus judges) · **LangSmith** tracing (optional) · prompt **guardrails** (regex + normalization) · SQLite LLM cache, embedding disk cache, conversation checkpoints · **Docker Compose** (optional Ollama profile) · **pytest** + **Ruff** in CI*
 
 ---
 
 ## Features
 
-### Multi-Agent Supervisor
-Natural language routing to the right sub-agent automatically:
+### Two surfaces, one brain
 
-- *"Fetch recent NLP papers"* → fetches from arXiv, embeds, and stores
-- *"List saved papers"* → shows all papers with arXiv IDs, citation counts, and TLDRs
-- *"Find papers on diffusion models"* → hybrid search over local database
-- *"Summarize recent robotics work"* → retrieves and batch-summarizes papers
-- *"Summarize #2504.08123v2"* → summarizes a specific paper by arXiv ID
-- *"Compare #2301.12345 and #2504.08123"* → structured side-by-side comparison
-- *"Tag papers"* → clusters all papers into named research themes
-- *"Daily digest"* or *"Digest last 14 days"* → newsletter-style digest with optional email delivery
-- *"Diagram #2504.08123"* → Mermaid flowchart of the paper's methodology
-- *"Get figures from #2504.08123"* → extracts real images/figures from the paper
-- *"Export saved --bibtex"* → deterministic BibTeX/CSV export of saved papers (no LLM)
-- *"Find papers on LLMs then explain"* → search + show which sources were retrieved
-- *"Save tag #2504.08123 diffusion"* / *"Show tags #2504.08123"* → store and view user tags/notes per paper
-- *"Trends last 14 days"* → rising arXiv categories over two adjacent time windows (no LLM)
-- *"Fetch new ML papers then find the best ones on LLMs"* → chains fetch + search in one command
+| Surface | How to run | What you get |
+| --- | --- | --- |
+| **CLI** | `uv run python main.py` | Interactive supervisor: type plain English (or chained commands), see routing logs, streaming tokens where supported. |
+| **HTTP API** | `uv run uvicorn api:app --host 0.0.0.0 --port 8000` | Same supervisor behind **FastAPI** (`api.py`): JSON chat, SSE streaming, `/health`, OpenAPI docs at `/docs`. |
 
-### Self-RAG Agent
-The Q&A sub-agent actively verifies retrieval quality before responding:
+Both paths share tool calls, **thread-scoped memory** (`thread_id` in the API; session in the CLI), hybrid search, and guardrails.
 
-1. **Document grading** — each retrieved chunk is scored for relevance; irrelevant results are filtered
-2. **Query rewriting** — if retrieval quality is poor, the agent reformulates the query and retries (up to 2×)
-3. **Hallucination checking** — the generated answer is verified against retrieved context; ungrounded answers trigger a retry with a disclaimer
-4. **Source citations** — answers include a Sources block listing arXiv IDs and titles of retrieved papers
+### Multi-agent supervisor (orchestration)
 
-### Hybrid Search + Cross-Encoder Reranking
-Combines dense vector similarity (OpenAI embeddings) with BM25 full-text search. Results are deduplicated by paper and reranked by a cross-encoder for higher precision. Pass `category_filter` to scope retrieval to a specific arXiv category.
+The supervisor **classifies each user message** into an intent and may run a **chain** of steps (e.g. fetch then search). You do not pick node names manually — describe what you want in natural language.
 
-### Semantic Scholar Enrichment
-Papers are automatically enriched at fetch time via a single batch request to the Semantic Scholar API — no per-paper calls. Adds `s2_tldr` (one-sentence summary), `s2_citations` (citation count), and `s2_fields` (fields of study). Used by `list`, `summarize`, and `tag` commands. Best-effort and non-blocking.
+| Task | Example phrasing | Execution |
+| --- | --- | --- |
+| **Ingest** | *"Fetch recent NLP papers"* | arXiv fetch → embed → LanceDB; incremental per-topic sync via `last_run.txt`. |
+| **Library** | *"List saved papers"* | Reads saved store; shows arXiv IDs, citations, TLDRs where enriched. |
+| **Search & Q&A** | *"Find papers on diffusion models"* | Hybrid search + rerank → **Self-RAG** answer grounded on abstracts (see below). |
+| **Synthesis** | *"Summarize recent robotics work"*, *"Summarize #2504.08123v2"* | Retrieves candidates or one paper, batch / single summarization. |
+| **Compare** | *"Compare #2301.12345 and #2504.08123"* | Structured comparison (motivation, method, limits, verdict); can fall back to search if IDs omitted. |
+| **Collection themes** | *"Tag papers"* | Theme clusters using Semantic Scholar fields when coverage is high; else LLM clustering on titles. |
+| **Reading aids** | *"Diagram #…"*, *"Get figures from #…"* | Mermaid from abstract **or** ar5iv HTML figures → PDF image fallback to `databases/paper_figures/`. |
+| **Digest** | *"Daily digest"*, *"Digest last 14 days"* | Category-grouped newsletter; optional SMTP email from `.env`. |
+| **No-LLM helpers** | *"Export saved --bibtex"*, *"… then explain"*, *"Trends last 14 days"* | Deterministic BibTeX/CSV, “sources used” for last RAG turn, category deltas over time windows. |
+| **Personalization** | *"Save tag #… diffusion"*, *"Show tags #…"* | SQLite-backed tags/notes; boosts retrieval when query words overlap saved tags. |
+| **Chaining** | *"Fetch new ML papers then find the best ones on LLMs"* | Same turn runs multiple intents in order. |
 
-### Auto-Tagging and Clustering
-```
-tag papers
-```
-Groups all fetched papers into named research themes. Uses S2 fields of study directly when available (≥80% coverage); falls back to LLM batch clustering over titles otherwise.
+### Self-RAG (retrieval-augmented Q&A)
 
-### Research Digest
-```
-daily digest
-digest last 14 days
-```
-Newsletter-style executive summary grouped by arXiv category. If SMTP credentials are set in `.env`, the digest is also emailed automatically.
+Used for open-ended **research questions** over your local corpus (not just keyword lookup). Implemented as a **LangGraph** graph in `agents/runner.py` (see module docstring for the full diagram): the agent calls **search tools**, **grades** retrieved chunks and drops weak ones before leaning on them, then drafts an answer, runs a **hallucination check** against context, and can **rewrite the query** (bounded retries) if grounding fails. Replies include a **Sources** block (arXiv IDs + titles) for verification.
 
-### Figure Extraction
-```
-get figures from #2504.08123
-show images from #2301.12345
-```
-Tries arXiv HTML (ar5iv) first for figure URLs and captions, then falls back to PDF image extraction (saved to `databases/paper_figures/<arxiv_id>/`). Falls back to a Mermaid diagram if no figures are found. Distinct from `diagram`, which always generates Mermaid from the abstract.
+### Hybrid search and reranking
 
-### Mermaid Diagrams
-```
-diagram #2504.08123
-```
-Generates a `flowchart TD` Mermaid diagram of the paper's methodology from its abstract. Paste into any Mermaid renderer (GitHub, [mermaid.live](https://mermaid.live), VS Code).
+- **Dense** vectors (OpenAI embeddings) plus **BM25** full-text over LanceDB; results **deduplicated per paper**.
+- **Cross-encoder** (`ms-marco-MiniLM-L-6-v2`) reranks the shortlist for sharper precision.
+- Optional **category filter** (arXiv category) on search; **interest-aware** nudge when saved tags align with query terms.
 
-### Paper Comparison
-```
-compare #2301.12345 and #2504.08123
-```
-Structured comparison across: problem & motivation, approach, results, limitations, and a verdict on when to prefer each. Falls back to top hybrid search results if no IDs are given.
+### Data pipeline: fetch → enrich → index
 
-### Export Metadata
-Export paper metadata deterministically (no LLM calls):
-```
-export saved --bibtex
-export saved --csv
-export #2301.12345v2 --bibtex
-export #2301.12345v2 --csv
-```
+- **Incremental ingestion** — per-topic timestamps in `databases/last_run.txt` avoid re-fetching the whole catalog.
+- **Semantic Scholar** — one batch request at fetch time adds TLDR, citation count, and fields-of-study (best-effort, non-blocking).
+- **Canonical IDs** — papers keep stable arXiv ids (e.g. `2504.08123v2`) usable across CLI and API.
 
-### Explain Sources
-Explain why the last RAG answer used certain sources (no LLM calls). Best used as a chain:
-```
-find papers on diffusion models then explain
-```
+### Caching, models, and streaming
 
-### Saved Tags & Notes
-Store user-controlled tags/notes for a paper, and reuse them for interest-aware ranking:
-```
-save tag #2301.12345v2 transformers
-show tags #2301.12345v2
-note #2301.12345v2 Important to read later
-show note #2301.12345v2
-```
+- **LLM response cache** (SQLite) and **embedding disk cache** (30-day TTL) reduce repeat cost.
+- **Summarizer** — prefers **Ollama** (`llama3.2` by default) when reachable; otherwise OpenAI **gpt-4o-mini**.
+- **Agent / RAG answers** — `AGENT_LLM=openai` (default) uses `OPENAI_MODEL` from `.env` (e.g. **gpt-5.4**); `AGENT_LLM=claude` uses Anthropic with prompt-caching headers.
+- **Streaming** — `summarize`, `clarify`, `compare`, `tag`, `digest`, `diagram`, and `figures` stream tokens in the CLI; the API exposes the same supervisor via **SSE** on `/chat/stream`.
 
-### Trend Analysis
-Compute rising categories over time windows (no LLM calls):
-```
-trends last 14 days
-trends last 30 days
-```
+### Conversation memory
 
-### Incremental Ingestion
-A per-topic timestamp registry ensures only newly published papers are fetched on subsequent runs — no duplicates. Papers are assigned canonical arXiv IDs (e.g. `2504.08123v2`) usable across commands.
-
-### Caching
-- SQLite cache for LLM responses (shared across runs)
-- Disk-backed embedding cache with 30-day TTL
-- Anthropic prompt caching header when using Claude
-
-### Multi-LLM Support
-- **Summarizer** — Ollama (llama3.2) if available, falls back to OpenAI gpt-4o-mini
-- **Agent** — OpenAI gpt-4o by default; set `AGENT_LLM=claude` for Anthropic Claude
-
-### Streaming Output
-`summarize`, `clarify`, `compare`, `tag`, `digest`, `diagram`, and `figures` stream tokens to the terminal as the model generates. `rag`, `ingestion`, and `list` print after completion.
-
-### Persistent Conversation Memory
-State is checkpointed to SQLite across restarts when `langgraph-checkpoint-sqlite` is available. If not available in your runtime, the app still runs but thread memory is non-persistent. Type `new session` or `reset` to start a fresh thread.
+LangGraph **checkpoints** to SQLite when `langgraph-checkpoint-sqlite` is available so `thread_id` / sessions survive restarts. Use `new session` or `reset` in the CLI for a fresh thread.
 
 ### Guardrails
-All user input and retrieved content passes through a sanitization layer — detects prompt injection, jailbreak patterns, role overrides, and data exfiltration using 20+ regex rules with Unicode normalization.
+
+User and retrieved text pass through `guardrails/sanitizer.py`: prompt-injection and jailbreak-style patterns, role overrides, and exfiltration-like content (**20+** rules, Unicode normalization). The API returns **400** when input is rejected.
 
 ---
 
@@ -130,6 +73,7 @@ All user input and retrieved content passes through a sanitization layer — det
 ```
 arxiv-ai-research-tracker/
 ├── main.py                    # Entry point — calls launch_supervisor()
+├── api.py                     # FastAPI app: /health, /chat, /chat/stream (SSE)
 ├── agents/
 │   ├── supervisor.py          # Multi-agent supervisor: routes all intents, supports chaining
 │   ├── runner.py              # Self-RAG LangGraph agent (grade_docs → agent → hallucination_check)
@@ -151,7 +95,10 @@ arxiv-ai-research-tracker/
 │   ├── eval_metrics_snapshot.json  # Pinned mean scores for README (regenerate locally)
 │   ├── run_eval.py            # Standalone eval runner
 │   ├── test_summarizer.py     # pytest — hallucination + summarization metrics
-│   └── test_rag.py            # pytest — faithfulness + relevancy metrics
+│   ├── test_rag.py            # pytest — faithfulness + relevancy metrics
+│   ├── test_api.py            # pytest — FastAPI routes (stubbed supervisor)
+│   ├── test_guardrails.py     # pytest — sanitizer edge cases
+│   └── test_feature_helpers.py  # pytest — deterministic export/trends/sqlite helpers
 ├── docs/
 │   └── sample_terminal_session.txt  # Illustrative CLI transcript
 ├── prompts/
@@ -177,11 +124,23 @@ Create a `.env` file using `.env.example` as a reference.
 
 ## Usage
 
+### CLI (interactive supervisor)
+
 ```bash
 uv run python main.py
 ```
 
-Run the HTTP API:
+### HTTP API (FastAPI)
+
+`api.py` defines a **[FastAPI](https://fastapi.tiangolo.com/)** application (`app`) served with **Uvicorn**. It wraps the same supervisor as the CLI: **Pydantic**-validated JSON bodies, OpenAPI schema, and optional **LangSmith** traces for requests that hit the LLM.
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/health` | GET | Liveness — returns `{"status":"ok"}`. |
+| `/chat` | POST | One full supervisor turn; JSON body `{"query":"...","thread_id":"..."}`. |
+| `/chat/stream` | POST | Same as `/chat` but streams **Server-Sent Events** (`text/event-stream`); ends with `event: done`. |
+
+After starting the server, open **`http://localhost:8000/docs`** for interactive **Swagger UI** (try requests from the browser) or **`http://localhost:8000/redoc`** for ReDoc.
 
 ```bash
 uv run uvicorn api:app --host 0.0.0.0 --port 8000
@@ -356,6 +315,6 @@ User input and retrieved content passes through `guardrails/sanitizer.py`. Queri
 ## Future Enhancements
 
 - [ ] Graph RAG — knowledge graph over entities and relationships across papers
-- [ ] Web interface with Streamlit/Gradio
+- [ ] Web UI (Streamlit/Gradio or SPA) on top of the existing FastAPI `/chat` and `/chat/stream` endpoints
 - [ ] Full PDF analysis — fetch and analyze the complete paper, not just the abstract
 - [ ] Slack digest delivery (alongside existing email delivery)
