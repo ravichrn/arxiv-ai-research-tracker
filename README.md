@@ -1,55 +1,70 @@
-# arxiv-ai-research-tracker
+# ArXiv AI Research Tracker
 
 A research assistant that fetches the latest AI papers from arXiv, indexes them into a searchable vector store, and lets you explore them through a conversational multi-agent interface — from the **terminal** or over **HTTP**.
 
-**Stack & keywords:** *arXiv ingestion · Semantic Scholar batch enrichment · LanceDB + hybrid retrieval (dense embeddings + BM25) · cross-encoder reranking · interest-aware rerank from saved tags · LangGraph **Self-RAG** (tool retrieval → **grade** irrelevant chunks → generate → **hallucination check** → capped **query rewrite**) · **LangChain** tools · **LangGraph** supervisor (NL routing + command chains) · **FastAPI** REST + **SSE** streaming · **Pydantic** request models · **DeepEval** faithfulness / relevancy (OpenAI / Claude / Prometheus judges) · **LangSmith** tracing (optional) · prompt **guardrails** (regex + normalization) · SQLite LLM cache, embedding disk cache, conversation checkpoints · **Docker Compose** (optional Ollama profile) · **pytest** + **Ruff** in CI*
+| Layer | Technology |
+|---|---|
+| Vector store & retrieval | LanceDB · OpenAI embeddings · BM25 · cross-encoder reranking |
+| Agent framework | LangGraph (supervisor + Self-RAG) · LangChain tools |
+| API | FastAPI · Pydantic · SSE streaming |
+| Data sources | arXiv API · Semantic Scholar batch API |
+| LLM support | OpenAI · Anthropic Claude · Ollama (local) |
+| Evaluation | DeepEval · LangSmith tracing |
+| Storage | SQLite (cache, memory, metadata) · NDJSON · diskcache |
+| Tooling | uv · Ruff · pytest · Docker Compose |
 
 ---
 
 ## Features
 
-### Two surfaces, one brain
+### Interfaces
 
 | Surface | How to run | What you get |
 | --- | --- | --- |
-| **CLI** | `uv run python main.py` | Interactive supervisor: type plain English (or chained commands), see routing logs, streaming tokens where supported. |
-| **HTTP API** | `uv run uvicorn api:app --host 0.0.0.0 --port 8000` | Same supervisor behind **FastAPI** (`api.py`): JSON chat, SSE streaming, `/health`, OpenAPI docs at `/docs`. |
+| **CLI** | `uv run python main.py` | Interactive supervisor — type plain English, see routing logs, and get streaming output where supported. |
+| **HTTP API** | `uv run uvicorn api:app --host 0.0.0.0 --port 8000` | The same supervisor behind FastAPI: JSON chat, SSE streaming, `/health`, and OpenAPI docs at `/docs`. |
 
-Both paths share tool calls, **thread-scoped memory** (`thread_id` in the API; session in the CLI), hybrid search, and guardrails.
+Both surfaces share the same tool calls, conversation memory, hybrid search, and guardrails.
 
-### Multi-agent supervisor (orchestration)
+### Multi-agent supervisor
 
-The supervisor **classifies each user message** into an intent and may run a **chain** of steps (e.g. fetch then search). You do not pick node names manually — describe what you want in natural language.
+Describe what you want in natural language. The supervisor routes your message to the right agent and can chain multiple steps in one turn.
 
-| Task | Example phrasing | Execution |
+| Capability | Example | What happens |
 | --- | --- | --- |
-| **Ingest** | *"Fetch recent NLP papers"* | arXiv fetch → embed → LanceDB; incremental per-topic sync via `last_run.txt`. |
-| **Library** | *"List saved papers"* | Reads saved store; shows arXiv IDs, citations, TLDRs where enriched. |
-| **Search & Q&A** | *"Find papers on diffusion models"* | Hybrid search + rerank → **Self-RAG** answer grounded on abstracts (see below). |
-| **Synthesis** | *"Summarize recent robotics work"*, *"Summarize #2504.08123v2"* | Retrieves candidates or one paper, batch / single summarization. |
-| **Compare** | *"Compare #2301.12345 and #2504.08123"* | Structured comparison (motivation, method, limits, verdict); can fall back to search if IDs omitted. |
-| **Collection themes** | *"Tag papers"* | Theme clusters using Semantic Scholar fields when coverage is high; else LLM clustering on titles. |
-| **Reading aids** | *"Diagram #…"*, *"Get figures from #…"* | Mermaid from abstract **or** ar5iv HTML figures → PDF image fallback to `databases/paper_figures/`. |
-| **Digest** | *"Daily digest"*, *"Digest last 14 days"* | Category-grouped newsletter; optional SMTP email from `.env`. |
-| **No-LLM helpers** | *"Export saved --bibtex"*, *"… then explain"*, *"Trends last 14 days"* | Deterministic BibTeX/CSV, “sources used” for last RAG turn, category deltas over time windows. |
-| **Personalization** | *"Save tag #… diffusion"*, *"Show tags #…"* | SQLite-backed tags/notes; boosts retrieval when query words overlap saved tags. |
-| **Chaining** | *"Fetch new ML papers then find the best ones on LLMs"* | Same turn runs multiple intents in order. |
+| **Ingest** | *”Fetch recent NLP papers”* | Pulls new papers from arXiv, embeds, and indexes them. Incremental — only fetches what's new. |
+| **Library** | *”List saved papers”* | Shows your saved collection with arXiv IDs, citation counts, and one-sentence TLDRs. |
+| **Search & Q&A** | *”Find papers on diffusion models”* | Hybrid search over your local corpus, then a grounded answer via Self-RAG (see below). |
+| **Summarize** | *”Summarize recent robotics work”*, *”Summarize #2504.08123v2”* | Batch or single-paper summarization. |
+| **Compare** | *”Compare #2301.12345 and #2504.08123”* | Side-by-side comparison: motivation, approach, limitations, and a verdict. |
+| **Themes** | *”Tag papers”* | Groups your collection into named research themes. |
+| **Reading aids** | *”Diagram #…”*, *”Get figures from #…”* | Mermaid methodology diagram from the abstract, or real figures extracted from the paper. |
+| **Digest** | *”Daily digest”*, *”Digest last 14 days”* | Newsletter-style summary grouped by research area, with optional email delivery. |
+| **Export** | *”Export saved --bibtex”*, *”Trends last 14 days”* | Deterministic BibTeX/CSV export, source attribution for the last answer, or category trend analysis. |
+| **Tags & notes** | *”Save tag #… diffusion”*, *”Show tags #…”* | Attach personal tags and notes to papers; influences future retrieval ranking. |
+| **Chaining** | *”Fetch new ML papers then find the best ones on LLMs”* | Multiple steps run in sequence within a single turn. |
 
 ### Self-RAG (retrieval-augmented Q&A)
 
-Used for open-ended **research questions** over your local corpus (not just keyword lookup). Implemented as a **LangGraph** graph in `agents/runner.py` (see module docstring for the full diagram): the agent calls **search tools**, **grades** retrieved chunks and drops weak ones before leaning on them, then drafts an answer, runs a **hallucination check** against context, and can **rewrite the query** (bounded retries) if grounding fails. Replies include a **Sources** block (arXiv IDs + titles) for verification.
+Answers open-ended research questions over your local corpus using a multi-step verification loop:
+
+1. Retrieves candidate chunks with hybrid search.
+2. Grades each chunk for relevance — weak results are dropped before generation.
+3. Drafts an answer grounded only on the kept context.
+4. Checks the answer for hallucinations; rewrites the query and retries if grounding fails.
+5. Returns a **Sources** block (arXiv IDs + titles) for verification.
 
 ### Hybrid search and reranking
 
-- **Dense** vectors (OpenAI embeddings) plus **BM25** full-text over LanceDB; results **deduplicated per paper**.
-- **Cross-encoder** (`ms-marco-MiniLM-L-6-v2`) reranks the shortlist for sharper precision.
-- Optional **category filter** (arXiv category) on search; **interest-aware** nudge when saved tags align with query terms.
+- Dense vector search (OpenAI embeddings) combined with BM25 full-text search; results deduplicated per paper.
+- A cross-encoder reranks the shortlist for higher precision.
+- Optional arXiv category filter; saved tags influence ranking when they overlap the query.
 
-### Data pipeline: fetch → enrich → index
+### Ingestion pipeline
 
-- **Incremental ingestion** — per-topic timestamps in `databases/last_run.txt` avoid re-fetching the whole catalog.
-- **Semantic Scholar** — one batch request at fetch time adds TLDR, citation count, and fields-of-study (best-effort, non-blocking).
-- **Canonical IDs** — papers keep stable arXiv ids (e.g. `2504.08123v2`) usable across CLI and API.
+- **Incremental** — per-topic timestamps ensure only newly published papers are fetched on each run; no duplicates.
+- **Semantic Scholar enrichment** — a single batch request at fetch time adds a one-sentence TLDR, citation count, and fields of study.
+- **Canonical IDs** — papers are assigned stable arXiv IDs (e.g. `2504.08123v2`) usable across the CLI and API.
 
 ### Caching, models, and streaming
 
@@ -60,7 +75,7 @@ Used for open-ended **research questions** over your local corpus (not just keyw
 
 ### Conversation memory
 
-LangGraph **checkpoints** to SQLite when `langgraph-checkpoint-sqlite` is available so `thread_id` / sessions survive restarts. Use `new session` or `reset` in the CLI for a fresh thread.
+Conversation state is checkpointed to SQLite so sessions survive restarts. Use `new session` or `reset` in the CLI to start a fresh thread.
 
 ### Guardrails
 
@@ -175,7 +190,7 @@ Run with optional local Ollama sidecar:
 docker compose --profile local-llm up --build
 ```
 
-Convenience commands (optional):
+Make targets:
 
 ```bash
 make lint
@@ -253,26 +268,23 @@ cross-model. Use `EVAL_JUDGE=prometheus` or `claude` for stronger separation.
 | Adversarial RAG (`ADVERSARIAL_RAG_CASES`) | **1.000** | **0.362** | 3 | `openai/gpt-4o` |
 
 Notes:
-- Pinned means match [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json). Captured with **`gpt-4o`** judging answers from **`gpt-5.4`** (`OPENAI_MODEL`). If `.env` sets `EVAL_JUDGE_MODEL` equal to `OPENAI_MODEL`, scores skew high — override on the CLI (see below) or use `EVAL_JUDGE=prometheus|claude`. Re-run with `--write-metrics` after changing judges or corpus.
-- Hallucination on the summarizer suite was not measured in this snapshot because
-  the LanceDB table had no rows for the random summarizer sample path at run time
-  (run `main.py` / fetch first to populate).
-- Adversarial relevancy is often **expected to be low** when retrieval is intentionally
-  off-topic; faithfulness should stay high if the model refuses to invent facts.
+- Scores were captured with `gpt-4o` judging answers from a different agent model to avoid same-model inflation. If your `.env` uses the same model for both agent and judge, scores will skew high — use `EVAL_JUDGE=prometheus` or `claude` for separation.
+- Adversarial answer relevancy is expected to be low when retrieval is intentionally off-topic; faithfulness should remain high if the model refuses to fabricate.
+- The summarizer hallucination metric requires papers to be indexed first — run `main.py` and fetch at least one topic before evaluating.
 
 ```bash
-uv run python -m evaluation.run_eval                        # all suites
-uv run python -m evaluation.run_eval --suite rag            # RAG only
-uv run python -m evaluation.run_eval --suite adversarial    # adversarial only
-# After a successful run, capture aggregates for README / CI artifacts (pin gpt-4o judge if .env uses gpt-5.4 for both):
-EVAL_JUDGE=openai EVAL_JUDGE_MODEL=gpt-4o uv run python -m evaluation.run_eval --suite all --write-metrics evaluation/eval_metrics_snapshot.json
-uv run pytest evaluation/                                   # pytest suite
+uv run python -m evaluation.run_eval                   # all suites
+uv run python -m evaluation.run_eval --suite rag       # RAG only
+uv run python -m evaluation.run_eval --suite adversarial
+
+# Pin a cross-model judge and write updated scores to the snapshot file:
+EVAL_JUDGE=openai EVAL_JUDGE_MODEL=gpt-4o \
+  uv run python -m evaluation.run_eval --suite all --write-metrics evaluation/eval_metrics_snapshot.json
+
+uv run pytest evaluation/                              # pytest suite
 ```
 
-At the end of a successful `run_eval` run, the runner prints an `EVAL_SUMMARY`
-block you can paste into release notes or refresh the table above.
-
-`evaluation/test_api.py` is a fast API-layer unit suite that stubs heavy supervisor/runtime dependencies; it validates endpoint behavior and error handling without requiring live model/provider connectivity.
+After a successful run, the runner prints an `EVAL_SUMMARY` block you can use to refresh the table above. `evaluation/test_api.py` stubs the supervisor and validates endpoint behavior without requiring a live model or API key.
 
 **Judge model** — set `EVAL_JUDGE` in `.env`:
 
@@ -301,7 +313,7 @@ User input and retrieved content passes through `guardrails/sanitizer.py`. Queri
 
 ---
 
-## Get API Keys
+## API Keys
 
 | Provider | URL |
 |----------|-----|
