@@ -260,13 +260,14 @@ def hybrid_search(
     category_filter: str | None = None,
     rerank: bool = True,
 ) -> list:
-    """Hybrid vector + full-text search with chunk deduplication and optional reranking.
+    """Dense-vector search with chunk deduplication and optional cross-encoder reranking.
 
-    Retrieves up to k*3 candidate chunks via hybrid search (dense + BM25),
-    deduplicates to at most *k* unique papers (one best chunk each), then
-    reranks with a cross-encoder for higher precision.
-
-    Falls back to pure vector search if the FTS index is not yet built.
+    We still create an FTS index when possible (``_ensure_fts_index``) so BM25 can be
+    wired back in later. LangChain's LanceDB ``query_type=\"hybrid\"`` path is
+    incompatible with current ``langchain-community`` + ``lancedb`` pairs (duplicate
+    ``name`` kwarg to ``_query()``, and tuple queries rejected by LanceDB ≥0.30), so
+    retrieval uses **vector search with k*3 oversampling**; the cross-encoder reranker
+    recovers much of the precision full hybrid would add.
 
     Args:
         category_filter: Optional arXiv category code (e.g. "cs.RO") to restrict
@@ -277,12 +278,7 @@ def hybrid_search(
     # LangChain's LanceDB integration stores metadata as a Struct column with named
     # sub-fields — access via dot notation, not as a flat column or JSON string.
     filter_expr = f"metadata.categories LIKE '%{category_filter}%'" if category_filter else None
-    try:
-        chunks = store.similarity_search(query, k=k * 3, query_type="hybrid", filter=filter_expr)
-    except Exception as e:
-        # FTS index missing or incompatible — degrade to pure vector search.
-        _log.warning("[hybrid_search] BM25 unavailable, falling back to vector-only: %s", e)
-        chunks = store.similarity_search(query, k=k, filter=filter_expr)
+    chunks = store.similarity_search(query, k=k * 3, filter=filter_expr)
 
     # Deduplicate: keep the first (highest-ranked) chunk per paper URL.
     seen: dict[str, object] = {}
