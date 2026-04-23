@@ -1,13 +1,35 @@
+import logging
+import os
 from collections.abc import Iterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from prometheus_client import Info
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.supervisor import run_supervisor_once, stream_supervisor_once
 from guardrails.sanitizer import InputRejected, validate_user_input
 
+_log = logging.getLogger(__name__)
+
 app = FastAPI(title="arXiv AI Research Tracker API", version="0.1.0")
+
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+
+_MODEL_INFO = Info("agent_llm", "Active agent LLM configuration")
+
+
+@app.on_event("startup")
+def _record_model_info() -> None:
+    backend = os.getenv("AGENT_LLM", "openai")
+    model = (
+        os.getenv("VLLM_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or os.getenv("ANTHROPIC_MODEL")
+        or "default"
+    )
+    _MODEL_INFO.info({"backend": backend, "model": model})
 
 
 class ChatRequest(BaseModel):
@@ -63,6 +85,10 @@ def health() -> dict[str, str]:
 )
 def chat(req: ChatRequest) -> ChatResponse:
     try:
+        validate_user_input(req.query)
+    except (InputRejected, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
         response = run_supervisor_once(req.query, thread_id=req.thread_id)
         return ChatResponse(response=response, thread_id=req.thread_id, error=None)
     except InputRejected as exc:
@@ -70,7 +96,8 @@ def chat(req: ChatRequest) -> ChatResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+        _log.exception("Unhandled error in /chat")
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
 @app.post(
@@ -118,7 +145,8 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield f"event: error\ndata: {exc}\n\n"
         except ValueError as exc:
             yield f"event: error\ndata: {exc}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {type(exc).__name__}: {exc}\n\n"
+        except Exception:
+            _log.exception("Unhandled error in /chat/stream")
+            yield "event: error\ndata: Internal server error\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

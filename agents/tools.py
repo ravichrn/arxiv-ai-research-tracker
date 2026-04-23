@@ -1,8 +1,14 @@
+import re
+
 from langchain_core.tools import tool
 
 from databases.interest_rerank import interest_aware_rerank
 from databases.stores import hybrid_search, invalidate_fts_index, papers_store, saved_store
 from guardrails.sanitizer import sanitize_retrieved
+
+# arXiv URLs are strictly alphanumeric + a small set of punctuation — no quotes.
+# This whitelist guards against unexpected values reaching the LanceDB delete filter.
+_SAFE_URL_RE = re.compile(r"^https?://[a-zA-Z0-9._/:\-]+$")
 
 
 def _format_docs(docs) -> str:
@@ -55,12 +61,12 @@ def delete_paper_from_saved(title: str) -> str:
     docs = hybrid_search(saved_store, title, k=1)
     if docs:
         matched_title = docs[0].metadata.get("title", "")
-        # Delete by URL — arXiv URLs are alphanumeric+punctuation, no quotes,
-        # so no SQL injection risk. Avoids the title string escaping problem.
         url = docs[0].metadata.get("url", "")
-        if url:
+        if url and _SAFE_URL_RE.match(url):
+            # Preferred path: delete by URL. arXiv URLs are safe (no quotes).
             saved_store.get_table().delete(f"url = '{url}'")
         else:
+            # Fallback: delete by title with standard SQL single-quote escaping.
             safe_title = matched_title.replace("'", "''")
             saved_store.get_table().delete(f"title = '{safe_title}'")
         invalidate_fts_index(saved_store)
