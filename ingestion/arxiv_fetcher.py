@@ -67,7 +67,8 @@ def _load_last_run() -> dict:
     # Legacy format: single ISO timestamp — treat as an "all" entry.
     try:
         return {"all": raw}
-    except Exception:
+    except Exception as e:
+        print(f"Warning: could not parse last_run.txt — starting fresh. ({e})")
         return {}
 
 
@@ -436,7 +437,7 @@ def fetch_paper_content(arxiv_id: str, pdf_url: str) -> dict | None:
             if figures:
                 return {"figures": figures, "sections": sections[:20], "source": "html"}
     except Exception as e:
-        print(f"[figures] HTML fetch failed: {e}")
+        print(f"[figures] HTML fetch failed for {arxiv_id}: {e}")
 
     # --- PDF fallback ---
     try:
@@ -461,7 +462,7 @@ def fetch_paper_content(arxiv_id: str, pdf_url: str) -> dict | None:
             if figures:
                 return {"figures": figures, "sections": [], "source": "pdf"}
     except Exception as e:
-        print(f"[figures] PDF extraction failed: {e}")
+        print(f"[figures] PDF extraction failed for {arxiv_id}: {e}")
 
     return None
 
@@ -492,6 +493,9 @@ def enrich_with_s2(papers: list[dict]) -> list[dict]:
             return papers
 
         results = resp.json()
+        if not isinstance(results, list):
+            print(f"[S2] enrichment skipped: unexpected response format ({type(results).__name__})")
+            return papers
         # Build lookup: base arXiv ID → S2 record
         s2_by_id: dict[str, dict] = {}
         for record in results:

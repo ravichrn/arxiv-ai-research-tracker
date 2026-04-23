@@ -8,10 +8,13 @@ paper title so it stays stable across arXiv version strings.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 _DB_DIR = Path(__file__).parent
 DEFAULT_DB_PATH = _DB_DIR / "saved_metadata.db"
@@ -149,6 +152,7 @@ def get_tags_for_titles(titles: list[str], db_path: Path = DEFAULT_DB_PATH) -> d
             if isinstance(tags, list):
                 out[str(title_key)] = [str(x) for x in tags]
         except Exception:
+            _log.warning("Corrupted tags JSON for title_key=%r — treating as empty.", title_key)
             out[str(title_key)] = []
     return out
 

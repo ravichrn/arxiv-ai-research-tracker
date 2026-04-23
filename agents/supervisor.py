@@ -370,18 +370,9 @@ def explain_node(state: SupervisorState) -> dict:
         )
         return {"last_result": result, "messages": [AIMessage(content=result)]}
 
-    def _parse_block(block: str) -> tuple[str, str, str]:
-        title_match = _re.search(r"Title\s*:\s*(.+)", block)
-        url_match = _re.search(r"URL\s*:\s*(https?://\S+)", block)
-        abstract_match = _re.search(r"Abstract\s*:\s*(.+)", block)
-        title = title_match.group(1).strip() if title_match else ""
-        url = url_match.group(1).strip() if url_match else ""
-        abstract = abstract_match.group(1).strip() if abstract_match else ""
-        return title, url, abstract
-
     lines: list[str] = ["Sources used:"]
     for i, block in enumerate(retrieval_context[:6], 1):
-        title, url, abstract = _parse_block(str(block))
+        title, url, abstract = _parse_doc_block(str(block))
         snippet = abstract[:180] + ("…" if len(abstract) > 180 else "")
         if title and url:
             lines.append(f"{i}. {title} ({url})")
@@ -995,6 +986,17 @@ def _dispatch_intent(state: SupervisorState) -> str:
     return "clarify"
 
 
+def _parse_doc_block(block: str) -> tuple[str, str, str]:
+    """Extract (title, url, abstract) from a formatted _format_docs block."""
+    title_match = _re.search(r"Title\s*:\s*(.+)", block)
+    url_match = _re.search(r"URL\s*:\s*(https?://\S+)", block)
+    abstract_match = _re.search(r"Abstract\s*:\s*(.+)", block)
+    title = title_match.group(1).strip() if title_match else ""
+    url = url_match.group(1).strip() if url_match else ""
+    abstract = abstract_match.group(1).strip() if abstract_match else ""
+    return title, url, abstract
+
+
 def _format_citations(context: list[str]) -> str:
     """Parse title + arxiv ID from retrieval_context blocks and format as a Sources list.
 
@@ -1005,14 +1007,12 @@ def _format_citations(context: list[str]) -> str:
     """
     citations: list[str] = []
     for block in context:
-        title_match = _re.search(r"Title\s*:\s*(.+)", block)
-        url_match = _re.search(r"URL\s*:\s*(https?://\S+)", block)
-        if not title_match:
+        title, url, _ = _parse_doc_block(block)
+        if not title:
             continue
-        title = title_match.group(1).strip()
         arxiv_id = ""
-        if url_match:
-            id_match = _re.search(r"/abs/(\S+)", url_match.group(1))
+        if url:
+            id_match = _re.search(r"/abs/([\d.v]+)", url)
             if id_match:
                 arxiv_id = id_match.group(1)
         line = f"  [{arxiv_id}] {title}" if arxiv_id else f"  {title}"

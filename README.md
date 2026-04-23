@@ -19,10 +19,10 @@ A research assistant that fetches the latest AI papers from arXiv, indexes them 
 
 ### Interfaces
 
-| Surface | How to run | What you get |
-| --- | --- | --- |
-| **CLI** | `uv run python main.py` | Interactive supervisor — type plain English, see routing logs, and get streaming output where supported. |
-| **HTTP API** | `uv run uvicorn api:app --host 0.0.0.0 --port 8000` | The same supervisor behind FastAPI: JSON chat, SSE streaming, `/health`, and OpenAPI docs at `/docs`. |
+| Surface | What you get |
+| --- | --- |
+| **CLI** | Interactive supervisor — type plain English, see routing logs, and get streaming output where supported. |
+| **HTTP API** | The same supervisor behind FastAPI: JSON chat, SSE streaming, `/health`, and OpenAPI docs at `/docs`. |
 
 Both surfaces share the same tool calls, conversation memory, hybrid search, and guardrails.
 
@@ -76,10 +76,6 @@ Answers open-ended research questions over your local corpus using a multi-step 
 ### Conversation memory
 
 Conversation state is checkpointed to SQLite so sessions survive restarts. Use `new session` or `reset` in the CLI to start a fresh thread.
-
-### Guardrails
-
-User and retrieved text pass through `guardrails/sanitizer.py`: prompt-injection and jailbreak-style patterns, role overrides, and exfiltration-like content (**20+** rules, Unicode normalization). The API returns **400** when input is rejected.
 
 ---
 
@@ -199,27 +195,6 @@ make api
 make ci-test
 ```
 
-```
-[Supervisor Ready] Fetch, search, summarize, compare, tag, digest, or diagram papers.
-Examples:
-  - 'fetch recent robotics papers'
-  - 'list saved papers'
-  - 'find papers on diffusion models'
-  - 'summarize #2504.08123v2'
-  - 'compare #2301.12345 and #2504.08123'
-  - 'tag papers'
-  - 'daily digest'
-  - 'diagram #2504.08123'
-  - 'get figures from #2504.08123'
-  - 'export saved --bibtex'
-  - 'save tag #2504.08123 diffusion'
-  - 'trends last 14 days'
-  - 'find papers on LLMs then explain'
-  - 'fetch NLP papers then find the best on transformers'
-
-You:
-```
-
 Type `exit` or `quit` to stop. Use `ollama pull llama3.2` for local summarization.
 
 ---
@@ -309,7 +284,7 @@ All LLM calls and agent steps appear in the LangSmith dashboard automatically.
 
 ## Security
 
-User input and retrieved content passes through `guardrails/sanitizer.py`. Queries over 500 characters are rejected. API keys are never hardcoded — loaded from `.env` only.
+All user input and retrieved content passes through `guardrails/sanitizer.py`: prompt-injection patterns, jailbreak triggers, role overrides, and exfiltration-style content (20+ rules, Unicode normalization). Queries over 500 characters are rejected; the API returns HTTP 400 for invalid input. API keys are never hardcoded — loaded from `.env` only.
 
 ---
 

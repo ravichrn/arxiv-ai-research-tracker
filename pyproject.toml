@@ -44,6 +44,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=3.0.3",
     "fastapi",
     "uvicorn",
+    "prometheus-fastapi-instrumentator>=7.0,<8",
 ]
 
 [project.scripts]

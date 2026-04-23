@@ -1,8 +1,12 @@
+import logging
 import os
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+_log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -37,14 +41,17 @@ class _CachedEmbeddings(Embeddings):
     def __init__(self):
         self._cache = None
         self._base = None
+        self._lock = threading.Lock()
 
     def _init(self):
         if self._base is None:
-            import diskcache
-            from langchain_openai import OpenAIEmbeddings
+            with self._lock:
+                if self._base is None:  # re-check after acquiring lock
+                    import diskcache
+                    from langchain_openai import OpenAIEmbeddings
 
-            self._base = OpenAIEmbeddings()
-            self._cache = diskcache.Cache(str(_DB_DIR / "embedding_cache"))
+                    self._base = OpenAIEmbeddings()
+                    self._cache = diskcache.Cache(str(_DB_DIR / "embedding_cache"))
 
     @staticmethod
     def _is_rate_limit(exc: BaseException) -> bool:
@@ -179,7 +186,7 @@ def _ensure_fts_index(store) -> None:
         tbl.create_fts_index("text", replace=True, language="English", stem=True)
         _FTS_INDEXED.add(key)
     except Exception as e:
-        print(f"[FTS] index creation skipped: {e}")
+        _log.warning("[FTS] index creation skipped: %s", e)
 
 
 _FTS_INDEXED: set[int] = set()
@@ -242,7 +249,7 @@ def _rerank(query: str, docs: list) -> list:
         ranked = sorted(zip(scores, docs, strict=True), key=lambda x: x[0], reverse=True)
         return [doc for _, doc in ranked]
     except Exception as e:
-        print(f"[Reranker] skipped: {e}")
+        _log.warning("[Reranker] skipped: %s", e)
         return docs
 
 
@@ -272,8 +279,9 @@ def hybrid_search(
     filter_expr = f"metadata.categories LIKE '%{category_filter}%'" if category_filter else None
     try:
         chunks = store.similarity_search(query, k=k * 3, query_type="hybrid", filter=filter_expr)
-    except Exception:
-        # FTS index missing or incompatible version — degrade gracefully.
+    except Exception as e:
+        # FTS index missing or incompatible — degrade to pure vector search.
+        _log.warning("[hybrid_search] BM25 unavailable, falling back to vector-only: %s", e)
         chunks = store.similarity_search(query, k=k, filter=filter_expr)
 
     # Deduplicate: keep the first (highest-ranked) chunk per paper URL.
@@ -329,6 +337,18 @@ def _make_agent_llm():
             model=model,
             temperature=0.3,
             model_kwargs={"extra_headers": {"anthropic-beta": "prompt-caching-2024-07-31"}},
+        )
+    if choice == "vllm":
+        from langchain_openai import ChatOpenAI
+
+        base_url = os.getenv("VLLM_BASE_URL", "http://vllm:8080/v1")
+        model = os.getenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+        print(f"[LLM] Agent → vLLM ({model}) at {base_url}")
+        return ChatOpenAI(
+            base_url=base_url,
+            api_key="EMPTY",  # vLLM requires a non-empty but arbitrary value
+            model=model,
+            temperature=0.3,
         )
     from langchain_openai import ChatOpenAI
 
