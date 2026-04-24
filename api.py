@@ -15,6 +15,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from agents.supervisor import run_supervisor_once, stream_supervisor_once
+from databases.stores import _check_ollama
 from guardrails.sanitizer import InputRejected, validate_user_input
 
 logging.config.dictConfig(
@@ -47,17 +48,6 @@ except ValueError:
     _MODEL_INFO = REGISTRY._names_to_collectors.get("agent_llm_info")  # type: ignore[assignment]
 
 _limiter = Limiter(key_func=get_remote_address)
-
-
-def _ollama_reachable() -> bool:
-    """Match stores.py summarizer routing — cheap TCP check, no model load."""
-    try:
-        import urllib.request
-
-        urllib.request.urlopen("http://localhost:11434", timeout=1)
-        return True
-    except Exception:
-        return False
 
 
 @asynccontextmanager
@@ -134,7 +124,7 @@ def health() -> dict[str, str]:
 def models() -> dict[str, str]:
     """Returns the active LLM backend and model name."""
     ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
-    summarizer = f"ollama/{ollama_model}" if _ollama_reachable() else "openai/gpt-4o-mini"
+    summarizer = f"ollama/{ollama_model}" if _check_ollama() else "openai/gpt-4o-mini"
     return {
         "backend": os.getenv("AGENT_LLM", "openai"),
         "agent_model": os.getenv("VLLM_MODEL")

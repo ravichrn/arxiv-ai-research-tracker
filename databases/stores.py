@@ -127,12 +127,17 @@ class _LazyProxy:
     def __init__(self, factory):
         object.__setattr__(self, "_factory", factory)
         object.__setattr__(self, "_obj", None)
+        object.__setattr__(self, "_lock", threading.Lock())
 
     def _get(self):
         obj = object.__getattribute__(self, "_obj")
         if obj is None:
-            obj = object.__getattribute__(self, "_factory")()
-            object.__setattr__(self, "_obj", obj)
+            lock = object.__getattribute__(self, "_lock")
+            with lock:
+                obj = object.__getattribute__(self, "_obj")
+                if obj is None:
+                    obj = object.__getattribute__(self, "_factory")()
+                    object.__setattr__(self, "_obj", obj)
         return obj
 
     def __getattr__(self, name):
