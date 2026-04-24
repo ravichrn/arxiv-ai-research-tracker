@@ -45,6 +45,8 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "prometheus-fastapi-instrumentator>=7.0,<8",
+    "slowapi>=0.1.9",
+    "python-json-logger>=2.0",
 ]
 
 [project.scripts]

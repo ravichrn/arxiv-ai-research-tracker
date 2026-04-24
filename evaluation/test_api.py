@@ -48,7 +48,10 @@ def test_health_ok(api_module):
     client = TestClient(api_module.app)
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert "backend" in body
+    assert "model" in body
 
 
 def test_chat_success(monkeypatch, api_module):
@@ -109,3 +112,34 @@ def test_chat_stream_invalid_input_returns_400(monkeypatch, api_module):
     monkeypatch.setattr(api_module, "validate_user_input", _reject)
     resp = client.post("/chat/stream", json={"query": "   ", "thread_id": "demo"})
     assert resp.status_code == 400
+
+
+def test_metrics_endpoint(api_module):
+    client = TestClient(api_module.app)
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    assert "http_requests_total" in resp.text or "http_request" in resp.text
+
+
+def test_models_endpoint(monkeypatch, api_module):
+    monkeypatch.setenv("AGENT_LLM", "openai")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    client = TestClient(api_module.app)
+    resp = client.get("/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["backend"] == "openai"
+    assert "agent_model" in body
+    assert "summarizer_model" in body
+    assert "embedding_model" in body
+
+
+def test_vllm_backend_env(monkeypatch, api_module):
+    monkeypatch.setenv("AGENT_LLM", "vllm")
+    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+    client = TestClient(api_module.app)
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["backend"] == "vllm"
+    assert "Llama" in body["model"]
