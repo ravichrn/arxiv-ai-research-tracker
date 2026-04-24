@@ -63,16 +63,6 @@ class _CachedEmbeddings(Embeddings):
         stop=stop_after_attempt(4),
         reraise=True,
     )
-    def _embed_one_doc(self, text: str) -> list[float]:
-        assert self._base is not None
-        return self._base.embed_documents([text])[0]
-
-    @retry(
-        retry=retry_if_exception_type(Exception),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
-        stop=stop_after_attempt(4),
-        reraise=True,
-    )
     def _embed_many_docs(self, texts: list[str]) -> list[list[float]]:
         """Embed many documents in one call (preserves input order)."""
         assert self._base is not None
@@ -314,11 +304,11 @@ def _make_fast_llm():
         from langchain_ollama import ChatOllama
 
         model = os.getenv("OLLAMA_MODEL", "llama3.2")
-        print(f"[LLM] Summarizer → Ollama ({model})")
+        _log.info("[LLM] Summarizer → Ollama (%s)", model)
         return ChatOllama(model=model, temperature=0)
     from langchain_openai import ChatOpenAI
 
-    print("[LLM] Summarizer → OpenAI gpt-4o-mini (Ollama unavailable)")
+    _log.info("[LLM] Summarizer → OpenAI gpt-4o-mini (Ollama unavailable)")
     return ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 
@@ -328,28 +318,26 @@ def _make_agent_llm():
         from langchain_anthropic import ChatAnthropic
 
         model = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6")
-        print(f"[LLM] Agent → Anthropic ({model}) with prompt caching")
+        _log.info("[LLM] Agent → Anthropic (%s) with prompt caching", model)
         return ChatAnthropic(  # type: ignore[call-arg]
             model=model,
             temperature=0.3,
             model_kwargs={"extra_headers": {"anthropic-beta": "prompt-caching-2024-07-31"}},
         )
-    if choice == "vllm":
-        from langchain_openai import ChatOpenAI
+    from langchain_openai import ChatOpenAI
 
+    if choice == "vllm":
         base_url = os.getenv("VLLM_BASE_URL", "http://vllm:8080/v1")
         model = os.getenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
-        print(f"[LLM] Agent → vLLM ({model}) at {base_url}")
+        _log.info("[LLM] Agent → vLLM (%s) at %s", model, base_url)
         return ChatOpenAI(
             base_url=base_url,
             api_key="EMPTY",  # vLLM requires a non-empty but arbitrary value
             model=model,
             temperature=0.3,
         )
-    from langchain_openai import ChatOpenAI
-
     model = os.getenv("OPENAI_MODEL", "gpt-4o")
-    print(f"[LLM] Agent → OpenAI ({model})")
+    _log.info("[LLM] Agent → OpenAI (%s)", model)
     return ChatOpenAI(model=model, temperature=0.3)
 
 

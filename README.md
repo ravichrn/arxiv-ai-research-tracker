@@ -4,11 +4,13 @@ A research assistant that fetches the latest AI papers from arXiv, indexes them 
 
 | Layer | Technology |
 |---|---|
-| Vector store & retrieval | LanceDB · OpenAI embeddings · BM25 · cross-encoder reranking |
+| Vector store & retrieval | LanceDB · OpenAI embeddings · dense retrieval (k*3 oversample) · cross-encoder reranking · FTS index built for future BM25 |
 | Agent framework | LangGraph (supervisor + Self-RAG) · LangChain tools |
 | API | FastAPI · Pydantic · SSE streaming |
 | Data sources | arXiv API · Semantic Scholar batch API |
-| LLM support | OpenAI · Anthropic Claude · Ollama (local) |
+| LLM support | OpenAI · Anthropic Claude · Ollama (local) · vLLM (GPU serving) |
+| Model serving | vLLM OpenAI-compatible API · pluggable via `AGENT_LLM` env var |
+| Observability | Prometheus `/metrics` · Grafana dashboard · structured JSON logs |
 | Evaluation | DeepEval · LangSmith tracing |
 | Storage | SQLite (cache, memory, metadata) · NDJSON · diskcache |
 | Tooling | uv · Ruff · pytest · Docker Compose |
@@ -24,7 +26,7 @@ A research assistant that fetches the latest AI papers from arXiv, indexes them 
 | **CLI** | Interactive supervisor — type plain English, see routing logs, and get streaming output where supported. |
 | **HTTP API** | The same supervisor behind FastAPI: JSON chat, SSE streaming, `/health`, and OpenAPI docs at `/docs`. |
 
-Both surfaces share the same tool calls, conversation memory, hybrid search, and guardrails.
+Both surfaces share the same tool calls, conversation memory, the same `hybrid_search()` retrieval helper (dense + rerank today), and guardrails.
 
 ### Multi-agent supervisor
 
@@ -34,7 +36,7 @@ Describe what you want in natural language. The supervisor routes your message t
 | --- | --- | --- |
 | **Ingest** | *”Fetch recent NLP papers”* | Pulls new papers from arXiv, embeds, and indexes them. Incremental — only fetches what's new. |
 | **Library** | *”List saved papers”* | Shows your saved collection with arXiv IDs, citation counts, and one-sentence TLDRs. |
-| **Search & Q&A** | *”Find papers on diffusion models”* | Hybrid search over your local corpus, then a grounded answer via Self-RAG (see below). |
+| **Search & Q&A** | *”Find papers on diffusion models”* | LanceDB vector search (oversampled, reranked) over your local corpus, then a grounded answer via Self-RAG (see below). |
 | **Summarize** | *”Summarize recent robotics work”*, *”Summarize #2504.08123v2”* | Batch or single-paper summarization. |
 | **Compare** | *”Compare #2301.12345 and #2504.08123”* | Side-by-side comparison: motivation, approach, limitations, and a verdict. |
 | **Themes** | *”Tag papers”* | Groups your collection into named research themes. |
@@ -48,16 +50,17 @@ Describe what you want in natural language. The supervisor routes your message t
 
 Answers open-ended research questions over your local corpus using a multi-step verification loop:
 
-1. Retrieves candidate chunks with hybrid search.
+1. Retrieves candidate chunks via `hybrid_search()` (dense vectors + cross-encoder rerank).
 2. Grades each chunk for relevance — weak results are dropped before generation.
 3. Drafts an answer grounded only on the kept context.
 4. Checks the answer for hallucinations; rewrites the query and retries if grounding fails.
 5. Returns a **Sources** block (arXiv IDs + titles) for verification.
 
-### Hybrid search and reranking
+### Retrieval and reranking
 
-- Dense vector search (OpenAI embeddings) combined with BM25 full-text search; results deduplicated per paper.
-- A cross-encoder reranks the shortlist for higher precision.
+- **Dense vector search** (OpenAI embeddings) oversampled (roughly **3× k** chunks before dedupe), then **deduplication per paper** (by URL).
+- **Cross-encoder** reranking on the shortlist for higher precision.
+- An **FTS index** is maintained on the text column for future BM25/hybrid wiring; LangChain’s current `query_type="hybrid"` path is incompatible with recent `lancedb` releases, so BM25 is not mixed into the score today (see `hybrid_search` docstring in `databases/stores.py`).
 - Optional arXiv category filter; saved tags influence ranking when they overlap the query.
 
 ### Ingestion pipeline
@@ -66,12 +69,20 @@ Answers open-ended research questions over your local corpus using a multi-step 
 - **Semantic Scholar enrichment** — a single batch request at fetch time adds a one-sentence TLDR, citation count, and fields of study.
 - **Canonical IDs** — papers are assigned stable arXiv IDs (e.g. `2504.08123v2`) usable across the CLI and API.
 
-### Caching, models, and streaming
+### Model serving and caching
 
-- **LLM response cache** (SQLite) and **embedding disk cache** (30-day TTL) reduce repeat cost.
+- **Pluggable backends** — set `AGENT_LLM` in `.env` to switch between `openai`, `claude`, `ollama`, or `vllm`. vLLM runs any HuggingFace model locally via GPU with an OpenAI-compatible API.
 - **Summarizer** — prefers **Ollama** (`llama3.2` by default) when reachable; otherwise OpenAI **gpt-4o-mini**.
-- **Agent / RAG answers** — `AGENT_LLM=openai` (default) uses `OPENAI_MODEL` from `.env` (e.g. **gpt-5.4**); `AGENT_LLM=claude` uses Anthropic with prompt-caching headers.
+- **LLM response cache** (SQLite) and **embedding disk cache** (30-day TTL) reduce repeat cost.
+- **Prompt caching** — Anthropic beta header added automatically when `AGENT_LLM=claude`.
 - **Streaming** — `summarize`, `clarify`, `compare`, `tag`, `digest`, `diagram`, and `figures` stream tokens in the CLI; the API exposes the same supervisor via **SSE** on `/chat/stream`.
+
+### Observability
+
+- **Prometheus metrics** at `GET /metrics` — request count, p50/p95 latency, and error rate per endpoint.
+- **Grafana dashboard** (`grafana/dashboard.json`) — pre-built panels auto-provisioned on `docker compose --profile monitoring up`. Panels target `prometheus-fastapi-instrumentator` defaults (`http_requests_total` with grouped `status` labels like `2xx` / `5xx`, and `http_request_duration_seconds`).
+- **Structured JSON logs** — all log output is machine-parseable (compatible with Datadog, CloudWatch, etc.).
+- **Rate limiting** — `/chat` and `/chat/stream` are capped at 20 requests/minute per IP (HTTP 429 on excess).
 
 ### Conversation memory
 
@@ -84,7 +95,7 @@ Conversation state is checkpointed to SQLite so sessions survive restarts. Use `
 ```
 arxiv-ai-research-tracker/
 ├── main.py                    # Entry point — calls launch_supervisor()
-├── api.py                     # FastAPI app: /health, /chat, /chat/stream (SSE)
+├── api.py                     # FastAPI: /health, /models, /metrics, /chat, /chat/stream (SSE)
 ├── agents/
 │   ├── supervisor.py          # Multi-agent supervisor: routes all intents, supports chaining
 │   ├── runner.py              # Self-RAG LangGraph agent (grade_docs → agent → hallucination_check)
@@ -110,6 +121,10 @@ arxiv-ai-research-tracker/
 │   ├── test_api.py            # pytest — FastAPI routes (stubbed supervisor)
 │   ├── test_guardrails.py     # pytest — sanitizer edge cases
 │   └── test_feature_helpers.py  # pytest — deterministic export/trends/sqlite helpers
+├── grafana/
+│   ├── dashboard.json         # Pre-built Grafana dashboard (request rate, latency, errors)
+│   ├── prometheus.yml         # Prometheus scrape config targeting the app
+│   └── provisioning/          # Auto-provisioned Grafana datasource + dashboard
 ├── docs/
 │   └── sample_terminal_session.txt  # Illustrative CLI transcript
 ├── prompts/
@@ -147,7 +162,9 @@ uv run python main.py
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
-| `/health` | GET | Liveness — returns `{"status":"ok"}`. |
+| `/health` | GET | Liveness — returns `{"status":"ok","backend":"...","model":"..."}`. |
+| `/models` | GET | Active LLM backend and model names. |
+| `/metrics` | GET | Prometheus metrics (request count, latency, error rate). |
 | `/chat` | POST | One full supervisor turn; JSON body `{"query":"...","thread_id":"..."}`. |
 | `/chat/stream` | POST | Same as `/chat` but streams **Server-Sent Events** (`text/event-stream`); ends with `event: done`. |
 
@@ -185,6 +202,20 @@ Run with optional local Ollama sidecar:
 ```bash
 docker compose --profile local-llm up --build
 ```
+
+Run with vLLM GPU model serving:
+
+```bash
+AGENT_LLM=vllm docker compose --profile vllm up --build
+```
+
+Run with Prometheus + Grafana monitoring (dashboard at `http://localhost:3000`, Prometheus UI at `http://localhost:9090`):
+
+```bash
+docker compose --profile monitoring up
+```
+
+Grafana’s default login is **`admin` / `admin`** unless you set **`GF_SECURITY_ADMIN_PASSWORD`** in `.env` (recommended outside local sandboxes).
 
 Make targets:
 
