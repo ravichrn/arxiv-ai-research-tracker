@@ -17,7 +17,10 @@ def _format_docs(docs) -> str:
     results = []
     for doc in docs:
         meta = doc.metadata
+        arxiv_id = meta.get("arxiv_id", "")
+        pin_hint = f"  (use #{ arxiv_id} for follow-up commands)" if arxiv_id else ""
         results.append(
+            f"ArXiv ID : #{arxiv_id}{pin_hint}\n"
             f"Title    : {sanitize_retrieved(str(meta.get('title', '')))}\n"
             f"Authors  : {sanitize_retrieved(str(meta.get('authors', '')))}\n"
             f"Topics   : {meta.get('categories', 'N/A')}\n"
@@ -28,12 +31,42 @@ def _format_docs(docs) -> str:
     return "\n\n".join(results)
 
 
+def _format_live_results(papers: list[dict], source_label: str = "arXiv (live)") -> str:
+    """Format raw paper dicts from a live arXiv search the same way as _format_docs."""
+    if not papers:
+        return "No relevant papers found on arXiv."
+    results = []
+    for p in papers:
+        arxiv_id = p.get("arxiv_id", "")
+        pin_hint = f"  (use #{arxiv_id} for follow-up commands)" if arxiv_id else ""
+        results.append(
+            f"ArXiv ID : #{arxiv_id}{pin_hint}\n"
+            f"Title    : {sanitize_retrieved(p.get('title', ''))}\n"
+            f"Authors  : {sanitize_retrieved(p.get('authors', ''))}\n"
+            f"Topics   : {p.get('categories', 'N/A')}\n"
+            f"Published: {p.get('published', 'N/A')}\n"
+            f"URL      : {sanitize_retrieved(p.get('url', ''))}\n"
+            f"\nAbstract : {sanitize_retrieved(p.get('abstract', ''))}"
+        )
+    header = f"[Results from {source_label} — indexed locally for future searches]\n\n"
+    return header + "\n\n".join(results)
+
+
 @tool
 def search_papers(query: str) -> str:
-    """Search recent AI papers fetched from arXiv."""
+    """Search AI papers — checks local index first, then falls back to live arXiv search."""
     docs = hybrid_search(papers_store, query, k=3)
     docs = interest_aware_rerank(query, docs)
-    return _format_docs(docs)
+    if docs:
+        return _format_docs(docs)
+
+    # Nothing in the local index — query arXiv directly, then persist results.
+    from ingestion.arxiv_fetcher import save_and_index_papers, search_arxiv_live
+
+    live = search_arxiv_live(query, k=5)
+    if live:
+        save_and_index_papers(live)
+    return _format_live_results(live)
 
 
 @tool

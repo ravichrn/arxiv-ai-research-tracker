@@ -534,6 +534,61 @@ def enrich_with_s2(papers: list[dict]) -> list[dict]:
     return papers
 
 
+def save_and_index_papers(papers: list[dict]) -> list[dict]:
+    """Persist and index a list of paper dicts that were not fetched via fetch_papers.
+
+    Deduplicates against existing JSONL entries, enriches with S2, appends to
+    papers_raw.jsonl, and embeds into the vector store. Returns only the newly
+    saved papers (empty list if all were already known).
+    """
+    if not papers:
+        return []
+    known_urls = _load_raw_urls()
+    new_papers = [p for p in papers if p.get("url") and p["url"] not in known_urls]
+    if not new_papers:
+        return []
+
+    new_papers = enrich_with_s2(new_papers)
+    with _RAW_PAPERS_FILE.open("a") as fh:
+        for paper in new_papers:
+            fh.write(json.dumps(paper) + "\n")
+    _invalidate_papers_cache()
+    _embed_and_store(new_papers)
+    return new_papers
+
+
+def search_arxiv_live(query: str, k: int = 5) -> list[dict]:
+    """Free-text relevance search against the live arXiv API.
+
+    Used as a fallback when the local vector store has no indexed results for a
+    query. Returns up to *k* paper dicts in the same format as papers_raw.jsonl
+    (no S2 enrichment — abstracts only).
+    """
+    search = arxiv.Search(
+        query=query,
+        max_results=k,
+        sort_by=arxiv.SortCriterion.Relevance,
+    )
+    papers: list[dict] = []
+    try:
+        for result in _fetch_results(search):
+            papers.append(
+                {
+                    "arxiv_id": _arxiv_id(result),
+                    "url": result.entry_id,
+                    "pdf_url": str(result.pdf_url),
+                    "title": result.title,
+                    "authors": ", ".join(a.name for a in result.authors),
+                    "abstract": result.summary,
+                    "categories": ", ".join(result.categories),
+                    "published": result.published.isoformat(),
+                }
+            )
+    except Exception as e:
+        print(f"[arXiv live search] failed: {e}")
+    return papers
+
+
 def _embed_and_store(papers: list[dict]) -> int:
     """Embed a list of raw paper dicts and store them in LanceDB. Returns count stored."""
     if not papers:
