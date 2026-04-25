@@ -36,7 +36,7 @@ Describe what you want in natural language. The supervisor routes your message t
 | --- | --- | --- |
 | **Ingest** | *”Fetch recent NLP papers”* | Pulls new papers from arXiv, embeds, and indexes them. Incremental — only fetches what's new. |
 | **Library** | *”List saved papers”* | Shows your saved collection with arXiv IDs, citation counts, and one-sentence TLDRs. |
-| **Search & Q&A** | *”Find papers on diffusion models”* | LanceDB vector search (oversampled, reranked) over your local corpus, then a grounded answer via Self-RAG (see below). |
+| **Search & Q&A** | *”Find papers on diffusion models”*, *”Find JEPA paper by Yann LeCun”* | Local vector search first (oversampled, reranked); falls back to live arXiv search if nothing is indexed — results are automatically saved and indexed for future queries. Each result shows its `#arxiv_id` for immediate follow-up commands. |
 | **Summarize** | *”Summarize recent robotics work”*, *”Summarize #2504.08123v2”* | Batch or single-paper summarization. |
 | **Compare** | *”Compare #2301.12345 and #2504.08123”* | Side-by-side comparison: motivation, approach, limitations, and a verdict. |
 | **Themes** | *”Tag papers”* | Groups your collection into named research themes. |
