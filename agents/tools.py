@@ -18,7 +18,7 @@ def _format_docs(docs) -> str:
     for doc in docs:
         meta = doc.metadata
         arxiv_id = meta.get("arxiv_id", "")
-        pin_hint = f"  (use #{ arxiv_id} for follow-up commands)" if arxiv_id else ""
+        pin_hint = f"  (use #{arxiv_id} for follow-up commands)" if arxiv_id else ""
         results.append(
             f"ArXiv ID : #{arxiv_id}{pin_hint}\n"
             f"Title    : {sanitize_retrieved(str(meta.get('title', '')))}\n"

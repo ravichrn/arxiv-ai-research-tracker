@@ -152,7 +152,12 @@ def get_tags_for_titles(titles: list[str], db_path: Path = DEFAULT_DB_PATH) -> d
             if isinstance(tags, list):
                 out[str(title_key)] = [str(x) for x in tags]
         except Exception:
-            _log.warning("Corrupted tags JSON for title_key=%r — treating as empty.", title_key)
+            _log.error(
+                "Corrupted tags JSON for title_key=%r (value=%r) — treating as empty. "
+                "Run: UPDATE paper_metadata SET tags_json='[]' WHERE title_key=? to repair.",
+                title_key,
+                (tags_json or "")[:200],
+            )
             out[str(title_key)] = []
     return out
 
