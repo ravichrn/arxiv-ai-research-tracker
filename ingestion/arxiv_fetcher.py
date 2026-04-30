@@ -1,5 +1,10 @@
+import itertools
 import json
+import logging
+import os
 import re
+import shutil
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,8 +18,14 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from databases.stores import invalidate_fts_index, llm_fast, papers_store
 
+_log = logging.getLogger(__name__)
+
 LAST_RUN_FILE = Path(__file__).parent.parent / "databases" / "last_run.txt"
 TOPICS = ["cs.AI", "cs.LG", "cs.CL", "cs.RO"]
+
+# Configurable external service base URLs — override via environment for testing/mirroring.
+_AR5IV_BASE_URL = os.getenv("AR5IV_BASE_URL", "https://html.arxiv.org/abs")
+_S2_API_URL = os.getenv("S2_API_URL", "https://api.semanticscholar.org/graph/v1/paper/batch")
 
 # arXiv rate limit: 1 request per 3 seconds recommended for bulk access.
 _ARXIV_CLIENT = arxiv.Client(
@@ -136,6 +147,11 @@ def _arxiv_id(result: arxiv.Result) -> str:
     return result.get_short_id()
 
 
+def _base_arxiv_id(arxiv_id: str) -> str:
+    """Strip the version suffix from an arXiv ID, e.g. '2301.12345v2' → '2301.12345'."""
+    return arxiv_id.split("v", 1)[0]
+
+
 def get_paper_by_title(title: str) -> dict | None:
     """Look up a paper from papers_raw.jsonl by exact title (case-insensitive)."""
     title_lower = title.lower().strip()
@@ -181,11 +197,10 @@ def get_paper_by_arxiv_id(arxiv_id: str) -> dict | None:
         return None
 
     _load_papers_cache()
-    if _papers_arxiv_index is None or _papers_base_arxiv_index is None:
+    if _papers_arxiv_index is None:
         return None
 
-    base_id = arxiv_id.split("v", 1)[0]
-    return _papers_arxiv_index.get(arxiv_id) or _papers_base_arxiv_index.get(base_id)
+    return _papers_arxiv_index.get(arxiv_id) or _papers_arxiv_index.get(_base_arxiv_id(arxiv_id))
 
 
 def _print_paper(result: arxiv.Result) -> None:
@@ -213,18 +228,27 @@ _DB_DIR = Path(__file__).parent.parent / "databases"
 _papers_cache: list[dict] | None = None
 
 # Lookup indexes built from _papers_cache for O(1) retrieval.
+# _papers_arxiv_index stores both versioned ('2301.12345v2') and base ('2301.12345') keys
+# so any form of arXiv ID resolves in a single dict lookup.
 _papers_title_index: dict[str, dict] | None = None
 _papers_arxiv_index: dict[str, dict] | None = None
-_papers_base_arxiv_index: dict[str, dict] | None = None
+
+# Guards concurrent access to the cache globals and to papers_raw.jsonl on disk.
+_papers_lock = threading.Lock()
+# Prevents two concurrent fetch_papers() calls from interleaving their file writes.
+_fetch_lock = threading.Lock()
 
 
 def _build_papers_indexes(papers: list[dict]) -> None:
-    """Build in-memory indexes for quick paper lookup."""
-    global _papers_title_index, _papers_arxiv_index, _papers_base_arxiv_index
+    """Build in-memory indexes for quick paper lookup.
+
+    Both versioned ('2301.12345v2') and base ('2301.12345') arXiv IDs are stored
+    in _papers_arxiv_index so any form resolves in a single lookup.
+    """
+    global _papers_title_index, _papers_arxiv_index
 
     title_index: dict[str, dict] = {}
     arxiv_index: dict[str, dict] = {}
-    base_index: dict[str, dict] = {}
 
     arxiv_id_re = re.compile(r"/(?:abs|pdf)/(\d{4}\.\d{4,5}(?:v\d+)?)(?:\D|$)")
 
@@ -245,42 +269,42 @@ def _build_papers_indexes(papers: list[dict]) -> None:
         if arxiv_id:
             if arxiv_id not in arxiv_index:
                 arxiv_index[arxiv_id] = paper
-            base = arxiv_id.split("v", 1)[0]
-            if base not in base_index:
-                base_index[base] = paper
+            base = _base_arxiv_id(arxiv_id)
+            if base not in arxiv_index:
+                arxiv_index[base] = paper
 
     _papers_title_index = title_index
     _papers_arxiv_index = arxiv_index
-    _papers_base_arxiv_index = base_index
 
 
 def _load_papers_cache() -> list[dict]:
     global _papers_cache
-    if _papers_cache is not None:
-        return _papers_cache
-    if not _RAW_PAPERS_FILE.exists():
-        _papers_cache = []
+    with _papers_lock:
+        if _papers_cache is not None:
+            return _papers_cache
+        if not _RAW_PAPERS_FILE.exists():
+            _papers_cache = []
+            _build_papers_indexes(_papers_cache)
+            return _papers_cache
+        papers = []
+        for line in _RAW_PAPERS_FILE.read_text().splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    papers.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        _papers_cache = papers
         _build_papers_indexes(_papers_cache)
         return _papers_cache
-    papers = []
-    for line in _RAW_PAPERS_FILE.read_text().splitlines():
-        line = line.strip()
-        if line:
-            try:
-                papers.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    _papers_cache = papers
-    _build_papers_indexes(_papers_cache)
-    return _papers_cache
 
 
 def _invalidate_papers_cache() -> None:
-    global _papers_cache, _papers_title_index, _papers_arxiv_index, _papers_base_arxiv_index
-    _papers_cache = None
-    _papers_title_index = None
-    _papers_arxiv_index = None
-    _papers_base_arxiv_index = None
+    global _papers_cache, _papers_title_index, _papers_arxiv_index
+    with _papers_lock:
+        _papers_cache = None
+        _papers_title_index = None
+        _papers_arxiv_index = None
 
 
 def _load_raw_urls() -> set[str]:
@@ -294,6 +318,11 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
     No embedding or LanceDB writes — returns immediately after arXiv API calls.
     Returns the number of new papers saved.
     """
+    with _fetch_lock:
+        return _fetch_papers_locked(max_per_topic, topics)
+
+
+def _fetch_papers_locked(max_per_topic: int = 20, topics: list[str] | None = None) -> int:
     topics = topics or list(TOPICS)
     fetched_all = set(topics) >= set(TOPICS)
     now_str = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
@@ -308,8 +337,11 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
     new_count = 0
     new_papers: list[dict] = []
 
-    # Track the file offset before appending so we can rewrite enriched data later.
-    append_offset = _RAW_PAPERS_FILE.stat().st_size if _RAW_PAPERS_FILE.exists() else 0
+    # Count existing lines so we can atomically replace the file after S2 enrichment.
+    if _RAW_PAPERS_FILE.exists():
+        original_line_count = sum(1 for _ in _RAW_PAPERS_FILE.open())
+    else:
+        original_line_count = 0
 
     with _RAW_PAPERS_FILE.open("a") as fh:
         for i, topic in enumerate(topics):
@@ -358,15 +390,20 @@ def fetch_papers(max_per_topic: int = 20, topics: list[str] | None = None) -> in
                 print(f"\n[{topic}] {topic_count} new papers saved.")
             new_count += topic_count
 
-    # Enrich new papers with Semantic Scholar metadata, then rewrite their JSONL lines.
+    # Enrich new papers with Semantic Scholar metadata, then atomically rewrite the file.
     if new_papers:
         new_papers = enrich_with_s2(new_papers)
-        # Truncate back to the pre-append offset and re-append enriched records.
-        with _RAW_PAPERS_FILE.open("r+b") as fh:
-            fh.truncate(append_offset)
-        with _RAW_PAPERS_FILE.open("a") as fh:
+        # Write existing lines + enriched new lines to a temp file, then atomic rename.
+        # This avoids the truncate-then-reappend window where a crash would lose papers.
+        tmp = _RAW_PAPERS_FILE.with_suffix(".tmp")
+        with tmp.open("w") as fh:
+            if original_line_count > 0:
+                with _RAW_PAPERS_FILE.open() as src:
+                    for line in itertools.islice(src, original_line_count):
+                        fh.write(line)
             for paper in new_papers:
                 fh.write(json.dumps(paper) + "\n")
+        os.replace(tmp, _RAW_PAPERS_FILE)
 
     _invalidate_papers_cache()
     _save_last_run(topics, fetched_all)
@@ -403,6 +440,17 @@ def get_recent_papers(days: int = 7) -> list[dict]:
     return results
 
 
+def _cleanup_old_figures(max_age_days: int = 30) -> None:
+    """Remove paper figure directories older than max_age_days to bound disk usage."""
+    figures_root = _DB_DIR / "paper_figures"
+    if not figures_root.exists():
+        return
+    cutoff = time.time() - max_age_days * 86400
+    for entry in figures_root.iterdir():
+        if entry.is_dir() and entry.stat().st_mtime < cutoff:
+            shutil.rmtree(entry, ignore_errors=True)
+
+
 def fetch_paper_content(arxiv_id: str, pdf_url: str) -> dict | None:
     """Extract figures from a paper. Tries arXiv HTML first, falls back to PDF.
 
@@ -411,9 +459,10 @@ def fetch_paper_content(arxiv_id: str, pdf_url: str) -> dict | None:
         HTML figures: [{"url": str, "caption": str}]
         PDF figures:  [{"path": str, "page": int}]
     """
+    _cleanup_old_figures()
     # --- HTML path (ar5iv) ---
     try:
-        html_url = f"https://html.arxiv.org/abs/{arxiv_id}"
+        html_url = f"{_AR5IV_BASE_URL}/{arxiv_id}"
         resp = requests.get(html_url, timeout=15)
         if resp.status_code == 200:
             from bs4 import BeautifulSoup  # lazy import
@@ -443,6 +492,14 @@ def fetch_paper_content(arxiv_id: str, pdf_url: str) -> dict | None:
     try:
         pdf_resp = requests.get(pdf_url, timeout=30)
         if pdf_resp.status_code == 200:
+            content_type = pdf_resp.headers.get("Content-Type", "")
+            if "pdf" not in content_type and "octet-stream" not in content_type:
+                _log.warning(
+                    "[figures] Unexpected Content-Type %r for %s — skipping fitz.",
+                    content_type,
+                    arxiv_id,
+                )
+                return None
             import fitz  # lazy import (pymupdf)
 
             doc = fitz.open(stream=pdf_resp.content, filetype="pdf")
@@ -467,12 +524,27 @@ def fetch_paper_content(arxiv_id: str, pdf_url: str) -> dict | None:
     return None
 
 
+@retry(
+    retry=retry_if_exception_type((requests.Timeout, requests.ConnectionError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True,
+)
+def _s2_post(ids: list[str]) -> requests.Response:
+    return requests.post(
+        _S2_API_URL,
+        params={"fields": "tldr,citationCount,fieldsOfStudy"},
+        json={"ids": ids},
+        timeout=20,
+    )
+
+
 def enrich_with_s2(papers: list[dict]) -> list[dict]:
     """Batch-enrich papers with Semantic Scholar metadata (TLDR, citation count, fields).
 
     Sends all arXiv IDs in one POST request to the S2 Graph API.
     Adds s2_tldr, s2_citations, s2_fields to each paper dict in-place.
-    Best-effort: returns papers unchanged if S2 is unreachable.
+    Retries up to 3x on transient network errors; best-effort on other failures.
     """
     if not papers:
         return papers
@@ -482,12 +554,13 @@ def enrich_with_s2(papers: list[dict]) -> list[dict]:
         return papers
 
     try:
-        resp = requests.post(
-            "https://api.semanticscholar.org/graph/v1/paper/batch",
-            params={"fields": "tldr,citationCount,fieldsOfStudy"},
-            json={"ids": ids},
-            timeout=20,
-        )
+        resp = _s2_post(ids)
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", 60))
+            print(f"[S2] rate-limited — waiting {retry_after}s before giving up.")
+            time.sleep(retry_after)
+            print("[S2] enrichment skipped: rate limit not resolved.")
+            return papers
         if resp.status_code != 200:
             print(f"[S2] enrichment skipped: HTTP {resp.status_code}")
             return papers
@@ -504,12 +577,12 @@ def enrich_with_s2(papers: list[dict]) -> list[dict]:
             ext_ids = record.get("externalIds") or {}
             arxiv_raw = ext_ids.get("ArXiv") or ""
             if arxiv_raw:
-                s2_by_id[arxiv_raw.split("v")[0]] = record
+                s2_by_id[_base_arxiv_id(arxiv_raw)] = record
 
         enriched = 0
         for paper in papers:
             arxiv_id = paper.get("arxiv_id", "")
-            base = arxiv_id.split("v")[0]
+            base = _base_arxiv_id(arxiv_id)
             record = s2_by_id.get(base)
             if record:
                 tldr_obj = record.get("tldr")

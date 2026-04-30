@@ -1,9 +1,12 @@
 import logging
 import os
+import re
 import threading
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+from prometheus_client import Counter, Histogram
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 _log = logging.getLogger(__name__)
@@ -29,6 +32,7 @@ set_llm_cache(SQLiteCache(database_path=str(_DB_DIR / "llm_cache.db")))
 # ---------------------------------------------------------------------------
 import hashlib
 
+from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 _EMBEDDING_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days
@@ -91,9 +95,11 @@ class _CachedEmbeddings(Embeddings):
         for i, (text, key) in enumerate(zip(texts, keys, strict=True)):
             if key in self._cache:
                 results[i] = list(self._cache[key])
+                _embedding_cache_hits.inc()
             else:
                 missing_texts_by_key[key] = text
                 missing_indices_by_key.setdefault(key, []).append(i)
+                _embedding_cache_misses.inc()
 
         if missing_texts_by_key:
             missing_keys = list(missing_texts_by_key.keys())
@@ -114,7 +120,10 @@ class _CachedEmbeddings(Embeddings):
         assert self._cache is not None
         key = f"q:{hashlib.sha256(text.encode()).hexdigest()}"
         if key not in self._cache:
+            _embedding_cache_misses.inc()
             self._cache.set(key, self._embed_one_query(text), expire=_EMBEDDING_TTL_SECONDS)
+        else:
+            _embedding_cache_hits.inc()
         return list(self._cache[key])
 
 
@@ -150,14 +159,17 @@ class _LazyProxy:
 # ---------------------------------------------------------------------------
 _cached_embeddings = _CachedEmbeddings()
 _db_instance = None
+_db_lock = threading.Lock()
 
 
 def _get_db():
     global _db_instance
     if _db_instance is None:
-        import lancedb
+        with _db_lock:
+            if _db_instance is None:
+                import lancedb
 
-        _db_instance = lancedb.connect(str(_DB_DIR / "lancedb"))
+                _db_instance = lancedb.connect(str(_DB_DIR / "lancedb"))
     return _db_instance
 
 
@@ -218,7 +230,9 @@ saved_store = _LazyProxy(_make_saved_store)
 # Reranks (query, doc) pairs jointly — more accurate than bi-encoder similarity.
 # ---------------------------------------------------------------------------
 _reranker = None
+_reranker_failed_until: float = 0.0  # epoch seconds; 0 means not failed
 _RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_RERANKER_RETRY_AFTER = 300  # seconds before retrying after a failure
 
 
 def _get_reranker():
@@ -233,19 +247,91 @@ def _get_reranker():
 def _rerank(query: str, docs: list) -> list:
     """Rerank docs by cross-encoder (query, doc) score descending.
 
-    Falls back to original order if the model fails to load or score.
+    Falls back to original order on failure, prints a visible warning, and retries
+    after _RERANKER_RETRY_AFTER seconds so transient failures (OOM, disk) self-heal.
     """
+    global _reranker_failed_until, _reranker
     if not docs:
+        return docs
+    if _reranker_failed_until and time.monotonic() < _reranker_failed_until:
         return docs
     try:
         reranker = _get_reranker()
         pairs = [(query, doc.page_content) for doc in docs]
         scores = reranker.predict(pairs)
         ranked = sorted(zip(scores, docs, strict=True), key=lambda x: x[0], reverse=True)
+        _reranker_failed_until = 0.0  # clear backoff on success
         return [doc for _, doc in ranked]
     except Exception as e:
+        _reranker = None  # allow re-init on next attempt
+        _reranker_failed_until = time.monotonic() + _RERANKER_RETRY_AFTER
         _log.warning("[Reranker] skipped: %s", e)
+        print(
+            f"[Reranker] WARNING: cross-encoder unavailable ({e});"
+            f"retrying in {_RERANKER_RETRY_AFTER}s."
+        )
         return docs
+
+
+def _safe_category_filter(category_filter: str | None) -> str | None:
+    """Build a safe LanceDB LIKE filter expression for a category code.
+
+    Keeps only alphanumeric characters, dots, and hyphens — the only characters
+    that appear in valid arXiv category codes (e.g. cs.AI, eess.SP, q-bio.NC).
+    This explicitly strips LIKE wildcards (% and _) and any other metacharacters.
+    """
+    if not category_filter:
+        return None
+    safe = re.sub(r"[^\w.\-]", "", category_filter)
+    return f"metadata.categories LIKE '%{safe}%'" if safe else None
+
+
+_search_latency = Histogram(
+    "hybrid_search_duration_seconds",
+    "End-to-end latency of hybrid_search() including reranking",
+    ["store"],
+)
+_search_results = Histogram(
+    "hybrid_search_result_count",
+    "Number of results returned by hybrid_search()",
+    ["store", "reranked"],
+    buckets=[0, 1, 2, 3, 5, 10],
+)
+_embedding_cache_hits = Counter(
+    "embedding_cache_hits_total",
+    "Number of embedding cache hits",
+)
+_embedding_cache_misses = Counter(
+    "embedding_cache_misses_total",
+    "Number of embedding cache misses",
+)
+
+
+def _row_to_doc(row: dict) -> Document:
+    """Convert a raw LanceDB row dict to a LangChain Document."""
+    text = row.get("text", "")
+    meta = row.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = dict(meta)
+    return Document(page_content=text, metadata=meta)
+
+
+def _rrf_merge(vec_rows: list[dict], fts_rows: list[dict], k_rrf: int = 60) -> list[dict]:
+    """Merge two ranked lists with Reciprocal Rank Fusion."""
+    scores: dict[str, float] = {}
+    index: dict[str, dict] = {}
+
+    for rank, row in enumerate(vec_rows):
+        rid = str(row.get("id") or row.get("_rowid") or rank)
+        scores[rid] = scores.get(rid, 0.0) + 1.0 / (k_rrf + rank + 1)
+        index[rid] = row
+
+    for rank, row in enumerate(fts_rows):
+        rid = str(row.get("id") or row.get("_rowid") or rank)
+        scores[rid] = scores.get(rid, 0.0) + 1.0 / (k_rrf + rank + 1)
+        index[rid] = row
+
+    return [index[rid] for rid in sorted(scores, key=scores.__getitem__, reverse=True)]
 
 
 def hybrid_search(
@@ -255,38 +341,63 @@ def hybrid_search(
     category_filter: str | None = None,
     rerank: bool = True,
 ) -> list:
-    """Dense-vector search with chunk deduplication and optional cross-encoder reranking.
+    """Dense + sparse (BM25) hybrid search with RRF merge and cross-encoder reranking.
 
-    We still create an FTS index when possible (``_ensure_fts_index``) so BM25 can be
-    wired back in later. LangChain's LanceDB ``query_type=\"hybrid\"`` path is
-    incompatible with current ``langchain-community`` + ``lancedb`` pairs (duplicate
-    ``name`` kwarg to ``_query()``, and tuple queries rejected by LanceDB ≥0.30), so
-    retrieval uses **vector search with k*3 oversampling**; the cross-encoder reranker
-    recovers much of the precision full hybrid would add.
+    Vector search (ANN) and BM25 full-text search are run independently on the raw
+    LanceDB table (bypassing LangChain's broken ``query_type="hybrid"`` path, which
+    passes a tuple query rejected by LanceDB ≥0.30), then merged via Reciprocal Rank
+    Fusion. The cross-encoder reranker provides a final precision pass over candidates.
 
     Args:
         category_filter: Optional arXiv category code (e.g. "cs.RO") to restrict
                          results to papers whose ``categories`` field contains it.
         rerank: If True (default), rerank deduplicated results with a cross-encoder.
     """
-    _ensure_fts_index(store)
-    # LangChain's LanceDB integration stores metadata as a Struct column with named
-    # sub-fields — access via dot notation, not as a flat column or JSON string.
-    filter_expr = f"metadata.categories LIKE '%{category_filter}%'" if category_filter else None
-    chunks = store.similarity_search(query, k=k * 3, filter=filter_expr)
+    store_label = getattr(store, "_table_name", getattr(store, "_collection_name", "unknown"))
+    with _search_latency.labels(store=store_label).time():
+        _ensure_fts_index(store)
+        filter_expr = _safe_category_filter(category_filter)
 
-    # Deduplicate: keep the first (highest-ranked) chunk per paper URL.
-    seen: dict[str, object] = {}
-    for chunk in chunks:
-        parent = chunk.metadata.get("url", chunk.metadata.get("chunk_id", ""))
-        if parent not in seen:
-            seen[parent] = chunk
-        if len(seen) >= k:
-            break
+        # Bypass LangChain wrapper — use raw LanceDB table for both search branches.
+        tbl = store.get_table()
+        embedding = _cached_embeddings.embed_query(query)
 
-    result = list(seen.values())
-    if rerank and result:
-        result = _rerank(query, result)
+        # Vector branch: ANN search with k*3 oversampling.
+        vec_q = tbl.search(embedding, query_type="vector").limit(k * 3)
+        if filter_expr:
+            vec_q = vec_q.where(filter_expr, prefilter=True)
+        vec_rows = vec_q.to_list()
+
+        # FTS branch: BM25 search — only if index is confirmed built.
+        fts_rows: list[dict] = []
+        if id(store) in _FTS_INDEXED:
+            try:
+                fts_q = tbl.search(query, query_type="fts").limit(k * 3)
+                if filter_expr:
+                    fts_q = fts_q.where(filter_expr, prefilter=True)
+                fts_rows = fts_q.to_list()
+            except Exception as e:
+                _log.warning("[FTS] search failed, falling back to vector only: %s", e)
+
+        # Merge with RRF; fall back to pure vector order when BM25 unavailable.
+        merged_rows = _rrf_merge(vec_rows, fts_rows) if fts_rows else vec_rows
+        chunks = [_row_to_doc(row) for row in merged_rows]
+
+        # Deduplicate: keep the first (highest-ranked) chunk per paper URL.
+        seen: dict[str, object] = {}
+        for chunk in chunks:
+            parent = chunk.metadata.get("url", chunk.metadata.get("chunk_id", ""))
+            if parent not in seen:
+                seen[parent] = chunk
+            if len(seen) >= k:
+                break
+
+        result = list(seen.values())
+        did_rerank = rerank and result
+        if did_rerank:
+            result = _rerank(query, result)
+
+    _search_results.labels(store=store_label, reranked=str(did_rerank)).observe(len(result))
     return result
 
 
@@ -294,12 +405,12 @@ def hybrid_search(
 # LLMs — lazy singletons, provider packages only import on first use.
 # ---------------------------------------------------------------------------
 def _check_ollama() -> bool:
-    """Lightweight HTTP check — does not load the model into memory."""
+    """Confirm Ollama is running by hitting its /api/tags endpoint and checking HTTP 200."""
     try:
         import urllib.request
 
-        urllib.request.urlopen("http://localhost:11434", timeout=1)
-        return True
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=1) as resp:
+            return resp.status == 200
     except Exception:
         return False
 

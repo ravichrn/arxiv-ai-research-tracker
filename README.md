@@ -4,7 +4,7 @@ A research assistant that fetches the latest AI papers from arXiv, indexes them 
 
 | Layer | Technology |
 |---|---|
-| Vector store & retrieval | LanceDB · OpenAI embeddings · dense retrieval (k*3 oversample) · cross-encoder reranking · FTS index built for future BM25 |
+| Vector store & retrieval | LanceDB · OpenAI embeddings · dense + BM25 hybrid retrieval (RRF merge) · cross-encoder reranking |
 | Agent framework | LangGraph (supervisor + Self-RAG) · LangChain tools |
 | API | FastAPI · Pydantic · SSE streaming |
 | Data sources | arXiv API · Semantic Scholar batch API |
@@ -26,7 +26,7 @@ A research assistant that fetches the latest AI papers from arXiv, indexes them 
 | **CLI** | Interactive supervisor — type plain English, see routing logs, and get streaming output where supported. |
 | **HTTP API** | The same supervisor behind FastAPI: JSON chat, SSE streaming, `/health`, and OpenAPI docs at `/docs`. |
 
-Both surfaces share the same tool calls, conversation memory, the same `hybrid_search()` retrieval helper (dense + rerank today), and guardrails.
+Both surfaces share the same tool calls, conversation memory, the same `hybrid_search()` retrieval helper (dense + BM25 + rerank), and guardrails.
 
 ### Multi-agent supervisor
 
@@ -50,7 +50,7 @@ Describe what you want in natural language. The supervisor routes your message t
 
 Answers open-ended research questions over your local corpus using a multi-step verification loop:
 
-1. Retrieves candidate chunks via `hybrid_search()` (dense vectors + cross-encoder rerank).
+1. Retrieves candidate chunks via `hybrid_search()` (dense + BM25 via RRF, then cross-encoder rerank).
 2. Grades each chunk for relevance — weak results are dropped before generation.
 3. Drafts an answer grounded only on the kept context.
 4. Checks the answer for hallucinations; rewrites the query and retries if grounding fails.
@@ -58,9 +58,10 @@ Answers open-ended research questions over your local corpus using a multi-step 
 
 ### Retrieval and reranking
 
-- **Dense vector search** (OpenAI embeddings) oversampled (roughly **3× k** chunks before dedupe), then **deduplication per paper** (by URL).
-- **Cross-encoder** reranking on the shortlist for higher precision.
-- An **FTS index** is maintained on the text column for future BM25/hybrid wiring; LangChain’s current `query_type="hybrid"` path is incompatible with recent `lancedb` releases, so BM25 is not mixed into the score today (see `hybrid_search` docstring in `databases/stores.py`).
+- **Dense vector search** (OpenAI embeddings) and **BM25 full-text search** run in parallel against the raw LanceDB table (bypassing LangChain’s broken `query_type="hybrid"` path, which is incompatible with LanceDB ≥0.30).
+- Results are merged with **Reciprocal Rank Fusion** (RRF) — a document that ranks highly in both lists gets a boosted combined score.
+- **Cross-encoder reranking** on the merged shortlist for a final precision pass.
+- Chunk oversampling (3× k before dedupe) then **deduplication per paper** (by URL) before reranking.
 - Optional arXiv category filter; saved tags influence ranking when they overlap the query.
 
 ### Ingestion pipeline
@@ -83,6 +84,10 @@ Answers open-ended research questions over your local corpus using a multi-step 
 - **Grafana dashboard** (`grafana/dashboard.json`) — pre-built panels auto-provisioned on `docker compose --profile monitoring up`. Panels target `prometheus-fastapi-instrumentator` defaults (`http_requests_total` with grouped `status` labels like `2xx` / `5xx`, and `http_request_duration_seconds`).
 - **Structured JSON logs** — all log output is machine-parseable (compatible with Datadog, CloudWatch, etc.).
 - **Rate limiting** — `/chat` and `/chat/stream` are capped at 20 requests/minute per IP (HTTP 429 on excess).
+
+### LLM inference benchmarking (separate repo)
+
+Tiered routing, cost/latency benchmarks, and optional standalone gateway live in **`llm-inference-benchmarking`** (sibling repository). This app uses `llm_agent` / `llm_fast` from `databases/stores.py` only.
 
 ### Conversation memory
 

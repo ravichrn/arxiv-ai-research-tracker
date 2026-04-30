@@ -21,6 +21,7 @@ Sub-agents:
 """
 
 import json
+import logging
 import re as _re
 from collections.abc import Iterator
 from pathlib import Path
@@ -58,8 +59,11 @@ from ingestion.arxiv_fetcher import (
     list_papers,
 )
 
+_log = logging.getLogger(__name__)
+
 _MAX_CHAIN_STEPS = 3
 _CHECKPOINTER_WARNED = False
+_DIAGRAM_ABSTRACT_MAX_CHARS = 3000  # prevent token blow-up in diagram_node
 
 _TOPIC_ALIASES: dict[str, str] = {
     "ai": "cs.AI",
@@ -141,6 +145,11 @@ class SupervisorState(TypedDict):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _get_pinned_paper(state) -> str:
+    """Return the pinned_paper string from state, defaulting to empty string."""
+    return state.get("pinned_paper", "") or ""
+
+
 def _resolve_paper_ref(query: str) -> tuple[str, str, list[str]]:
     """Replace #<arxiv_id> references with paper titles.
 
@@ -183,7 +192,7 @@ def _parse_route(raw: str) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        print(f"  [Supervisor] WARNING: LLM returned malformed routing JSON — {raw[:120]!r}")
+        _log.warning("[Supervisor] LLM returned malformed routing JSON — %r", raw[:120])
         return {"steps": [], "topics": [], "rag_query": ""}
 
 
@@ -213,7 +222,7 @@ def route_node(state: SupervisorState) -> dict:
     if pending:
         # Already have a chain in progress — advance to the next step.
         next_intent = pending.pop(0)
-        print(f"  [Supervisor] chain advancing → intent={next_intent}, remaining={pending}")
+        _log.info("[Supervisor] chain advancing → intent=%s, remaining=%s", next_intent, pending)
         return {"intent": next_intent, "pending_chain": pending}
 
     # First call — parse intent from the user query.
@@ -238,7 +247,7 @@ def route_node(state: SupervisorState) -> dict:
         intent = steps[0]
         remaining = steps[1:]
 
-    print(f"  [Supervisor] intent={intent}, chain={remaining}, topics={resolved}")
+    _log.info("[Supervisor] intent=%s, chain=%s, topics=%s", intent, remaining, resolved)
     return {
         "intent": intent,
         "resolved_topics": resolved,
@@ -252,7 +261,7 @@ def route_node(state: SupervisorState) -> dict:
 def ingestion_node(state: SupervisorState) -> dict:
     """Fetch paper metadata from arXiv, display results, and index into vector store."""
     topics = state.get("resolved_topics") or list(TOPICS)
-    print(f"  [Supervisor] Fetching topics: {', '.join(topics)}")
+    _log.info("[Supervisor] Fetching topics: %s", ", ".join(topics))
     n = fetch_papers(topics=topics)
     result = (
         f"Fetched and indexed {n} new paper(s) for: {', '.join(topics)}. You can now search them."
@@ -264,7 +273,7 @@ def ingestion_node(state: SupervisorState) -> dict:
 
 def list_node(state: SupervisorState) -> dict:
     """List all saved papers with their arXiv IDs and titles."""
-    print("  [Supervisor] Listing saved papers...")
+    _log.info("[Supervisor] Listing saved papers.")
     result = list_papers()
     return {"last_result": result, "messages": [AIMessage(content=result)]}
 
@@ -281,7 +290,7 @@ def export_node(state: SupervisorState) -> dict:
     )
 
     # Scope selection: prefer pinned titles if provided.
-    pinned_one = state.get("pinned_paper", "") or ""
+    pinned_one = _get_pinned_paper(state)
     pinned_many = state.get("pinned_papers", []) or []
 
     papers: list[dict] = []
@@ -295,14 +304,17 @@ def export_node(state: SupervisorState) -> dict:
             if paper:
                 papers.append(paper)
 
-    # "export saved" fallback
+    # "export saved" fallback — paginate to avoid loading the entire table into memory.
     if not papers or "saved" in q_lower:
+        _PAGE = 200
+        tbl = saved_store.get_table()
         rows = (
-            saved_store.get_table()
-            .search()
+            tbl.search()
             .select(["url", "arxiv_id", "title", "authors", "categories", "published"])
+            .limit(_PAGE)
             .to_list()
         )
+        _log.info("[export] loaded %d saved rows (page size %d)", len(rows), _PAGE)
         seen_urls: set[str] = set()
         for r in rows:
             url = str(r.get("url", "")).strip()
@@ -340,7 +352,7 @@ def export_node(state: SupervisorState) -> dict:
 def rag_node(state: SupervisorState) -> dict:
     """Delegate to the Self-RAG sub-agent for paper Q&A."""
     query = state.get("rag_query") or _last_human_content(state)
-    print(f"  [Supervisor] RAG query: {query}")
+    _log.info("[Supervisor] RAG query: %s", query)
     result = rag_graph.invoke(
         {
             "messages": [_SYSTEM_MESSAGE, HumanMessage(content=query)],
@@ -390,7 +402,7 @@ def saved_tags_node(state: SupervisorState) -> dict:
     query = _last_human_content(state)
     q_lower = query.lower()
 
-    pinned = state.get("pinned_paper", "") or ""
+    pinned = _get_pinned_paper(state)
     if not pinned:
         result = (
             "To manage tags/notes, reference a paper first, e.g. "
@@ -474,12 +486,12 @@ def summarize_node(state: SupervisorState) -> dict:
     session and summarize only that paper — skipping the broad similarity search.
     """
     query = state.get("rag_query") or _last_human_content(state)
-    pinned = state.get("pinned_paper", "")
+    pinned = _get_pinned_paper(state)
 
     if pinned:
         paper = get_paper_by_title(pinned)
         if paper:
-            print(f"  [Supervisor] Summarizing pinned paper: {pinned}")
+            _log.info("[Supervisor] Summarizing pinned paper: %s", pinned)
             prompt = (
                 "You are a research assistant. Summarize the following paper in 5-7 bullet points, "
                 "highlighting the problem it solves, key methods, and main contributions.\n\n"
@@ -494,7 +506,7 @@ def summarize_node(state: SupervisorState) -> dict:
                 answer = f"TL;DR (Semantic Scholar): {s2_tldr}\n\n---\n\n{answer}"
             return {"last_result": answer, "messages": [AIMessage(content=answer)]}
 
-    print(f"  [Supervisor] Summarizing papers for: {query}")
+    _log.info("[Supervisor] Summarizing papers for: %s", query)
     docs = hybrid_search(papers_store, query, k=5)
     docs = interest_aware_rerank(query, docs)
     formatted = _format_docs(docs)
@@ -583,7 +595,7 @@ def compare_node(state: SupervisorState) -> dict:
             }
     else:
         # No pins or only one — search and take top results
-        print(f"  [Supervisor] Compare: no papers pinned, searching for: {query}")
+        _log.info("[Supervisor] Compare: no papers pinned, searching for: %s", query)
         docs = hybrid_search(papers_store, query, k=4, rerank=True)
         seen_titles: set[str] = set()
         for doc in docs:
@@ -604,7 +616,7 @@ def compare_node(state: SupervisorState) -> dict:
             )
             return {"last_result": result, "messages": [AIMessage(content=result)]}
 
-    print(f"  [Supervisor] Comparing {len(papers)} paper(s): {[p['title'] for p in papers]}")
+    _log.info("[Supervisor] Comparing %d paper(s): %s", len(papers), [p["title"] for p in papers])
 
     papers_section_parts = []
     for i, paper in enumerate(papers, 1):
@@ -689,12 +701,12 @@ def tag_node(state: SupervisorState) -> dict:
         result = "No papers found. Run a fetch first, then try tagging."
         return {"last_result": result, "messages": [AIMessage(content=result)]}
 
-    print(f"  [Supervisor] Clustering {len(papers)} paper(s) into research themes...")
+    _log.info("[Supervisor] Clustering %d paper(s) into research themes.", len(papers))
 
     # Prefer Semantic Scholar fields of study if available for >=80% of papers
     s2_covered = sum(1 for p in papers if p.get("s2_fields"))
     if s2_covered / len(papers) >= 0.8:
-        print(f"  [Supervisor] Using S2 fields for {s2_covered} papers (no LLM call).")
+        _log.info("[Supervisor] Using S2 fields for %d papers (no LLM call).", s2_covered)
         groups: dict[str, list[str]] = {}
         for p in papers:
             fields = p.get("s2_fields") or []
@@ -742,7 +754,9 @@ def digest_node(state: SupervisorState) -> dict:
         )
         return {"last_result": result, "messages": [AIMessage(content=result)]}
 
-    print(f"  [Supervisor] Generating digest for {len(papers)} paper(s) from last {days} day(s)...")
+    _log.info(
+        "[Supervisor] Generating digest for %d paper(s) from last %d day(s).", len(papers), days
+    )
 
     # Group by primary arXiv category
     groups: dict[str, list[dict]] = {}
@@ -800,7 +814,10 @@ def _send_digest_email(body: str, days: int, to_addr: str) -> None:
     """Send the digest via SMTP. Only called when DIGEST_EMAIL_TO is set."""
     import os
     import smtplib
+    import ssl
+    import time as _time
     from email.mime.text import MIMEText
+    from pathlib import Path
 
     host = os.getenv("DIGEST_SMTP_HOST", "")
     port = int(os.getenv("DIGEST_SMTP_PORT", "587"))
@@ -809,7 +826,7 @@ def _send_digest_email(body: str, days: int, to_addr: str) -> None:
     from_addr = os.getenv("DIGEST_EMAIL_FROM", user)
 
     if not host or not user or not password:
-        print("  [Digest] Email skipped — DIGEST_SMTP_HOST/USER/PASS not configured.")
+        _log.warning("[Digest] Email skipped — DIGEST_SMTP_HOST/USER/PASS not configured.")
         return
 
     from datetime import date
@@ -820,14 +837,29 @@ def _send_digest_email(body: str, days: int, to_addr: str) -> None:
     msg["From"] = from_addr
     msg["To"] = to_addr
 
-    try:
-        with smtplib.SMTP(host, port) as server:
-            server.starttls()
-            server.login(user, password)
-            server.sendmail(from_addr, [to_addr], msg.as_string())
-        print(f"  [Digest] Email sent to {to_addr}.")
-    except Exception as e:
-        print(f"  [Digest] Email failed: {e}")
+    context = ssl.create_default_context()
+    last_exc: Exception | None = None
+    for attempt in range(1, 3):
+        try:
+            with smtplib.SMTP(host, port) as server:
+                server.starttls(context=context)
+                server.login(user, password)
+                server.sendmail(from_addr, [to_addr], msg.as_string())
+            _log.info("[Digest] Email sent to %s.", to_addr)
+            return
+        except Exception as e:
+            last_exc = e
+            _log.warning("[Digest] Email attempt %d failed: %s", attempt, e)
+            if attempt < 2:
+                _time.sleep(5)
+
+    # Both attempts failed — persist the digest to disk so it isn't lost.
+    from databases.stores import _DB_DIR
+
+    log_path = Path(_DB_DIR) / "digest_failures.log"
+    with log_path.open("a") as fh:
+        fh.write(f"\n--- {date.today()} digest (send failed: {last_exc}) ---\n{body}\n")
+    _log.warning("[Digest] Email failed after 2 attempts. Digest saved to %s.", log_path)
 
 
 def diagram_node(state: SupervisorState) -> dict:
@@ -836,7 +868,7 @@ def diagram_node(state: SupervisorState) -> dict:
     Requires a paper pinned via #arxiv_id. Falls back to the top search result
     if no paper is pinned.
     """
-    pinned = state.get("pinned_paper", "")
+    pinned = _get_pinned_paper(state)
     query = state.get("rag_query") or _last_human_content(state)
 
     paper: dict | None = None
@@ -858,8 +890,9 @@ def diagram_node(state: SupervisorState) -> dict:
         )
         return {"last_result": result, "messages": [AIMessage(content=result)]}
 
-    print(f"  [Supervisor] Generating Mermaid diagram for: {paper['title']}")
-    prompt = _DIAGRAM_PROMPT.format(title=paper["title"], abstract=paper["abstract"])
+    _log.info("[Supervisor] Generating Mermaid diagram for: %s", paper["title"])
+    abstract = paper["abstract"][:_DIAGRAM_ABSTRACT_MAX_CHARS]
+    prompt = _DIAGRAM_PROMPT.format(title=paper["title"], abstract=abstract)
     answer = str(llm_agent.invoke(prompt).content)
     return {"last_result": answer, "messages": [AIMessage(content=answer)]}
 
@@ -870,7 +903,7 @@ def figures_node(state: SupervisorState) -> dict:
     Requires a paper pinned via #arxiv_id. Falls back to a Mermaid diagram
     (using _DIAGRAM_PROMPT) if no figures can be found in HTML or PDF.
     """
-    pinned = state.get("pinned_paper", "")
+    pinned = _get_pinned_paper(state)
 
     if not pinned:
         result = (
@@ -889,7 +922,7 @@ def figures_node(state: SupervisorState) -> dict:
 
     arxiv_id = paper.get("arxiv_id", "")
     pdf_url = paper.get("pdf_url", "")
-    print(f"  [Supervisor] Extracting figures for: {paper['title']}")
+    _log.info("[Supervisor] Extracting figures for: %s", paper["title"])
 
     content = fetch_paper_content(arxiv_id, pdf_url)
 
@@ -915,7 +948,7 @@ def figures_node(state: SupervisorState) -> dict:
         return {"last_result": answer, "messages": [AIMessage(content=answer)]}
 
     # Fallback to Mermaid diagram when no figures found
-    print(f"  [Supervisor] No figures found for '{paper['title']}' — falling back to Mermaid.")
+    _log.info("[Supervisor] No figures found for %r — falling back to Mermaid.", paper["title"])
     fallback_note = (
         "No figures could be extracted from this paper (HTML unavailable, PDF has no images). "
         "Generating a Mermaid methodology diagram instead:\n\n"
@@ -948,7 +981,7 @@ def finalize_node(state: SupervisorState) -> dict:
         return {}
 
     kept = len(other_msgs) - len(to_remove)
-    print(f"  [Supervisor] Trimmed {len(to_remove)} old message(s); keeping {kept}.")
+    _log.debug("[Supervisor] Trimmed %d old message(s); keeping %d.", len(to_remove), kept)
     return {"messages": removals}
 
 
@@ -1132,9 +1165,8 @@ def _warn_no_checkpointer() -> None:
     global _CHECKPOINTER_WARNED
     if _CHECKPOINTER_WARNED:
         return
-    print(
-        "  [Supervisor] WARNING: SQLite checkpointer unavailable; "
-        "running without persistent thread memory."
+    _log.warning(
+        "[Supervisor] SQLite checkpointer unavailable; running without persistent thread memory."
     )
     _CHECKPOINTER_WARNED = True
 
@@ -1238,28 +1270,9 @@ def launch_supervisor() -> None:
             try:
                 query = validate_user_input(query)
 
-                # Include the system message only on the first turn for a thread.
-                # The checkpointer accumulates messages across turns; subsequent
-                # turns just append the new HumanMessage.
                 checkpoint = checkpointer.get(config)
                 has_history = checkpoint is not None
-                initial_msgs = (
-                    [HumanMessage(content=query)]
-                    if has_history
-                    else [_SYSTEM_MESSAGE, HumanMessage(content=query)]
-                )
-
-                initial_state = {
-                    "messages": initial_msgs,
-                    "intent": "",
-                    "resolved_topics": [],
-                    "pending_chain": [],
-                    "rag_query": "",
-                    "last_result": "",
-                    "last_retrieval_context": [],
-                    "pinned_paper": "",
-                    "pinned_papers": [],
-                }
+                initial_state = _build_turn_initial_state(query, has_history)
 
                 # Stream both state snapshots (values) and LLM token chunks (messages).
                 # tokens from summarize/clarify nodes are printed inline as they arrive;

@@ -204,6 +204,7 @@ CLAUDE.md
 databases/agent_memory.db
 databases/agent_memory.db-shm
 databases/agent_memory.db-wal
+databases/gateway_usage.db
 databases/llm_cache.db
 databases/embedding_cache/
 databases/lancedb/
