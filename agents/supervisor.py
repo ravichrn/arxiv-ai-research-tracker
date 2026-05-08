@@ -39,6 +39,7 @@ except ImportError:  # pragma: no cover - depends on local langgraph install ext
 
 from agents.runner import rag_graph
 from agents.tools import _format_docs
+from databases.citation_graph import get_edges, has_edges, upsert_edges
 from databases.export_utils import render_bibtex, render_csv
 from databases.interest_rerank import interest_aware_rerank
 from databases.saved_metadata import (
@@ -51,6 +52,7 @@ from databases.trends_utils import compute_category_trends, render_trends_report
 from guardrails.sanitizer import InputRejected, validate_user_input
 from ingestion.arxiv_fetcher import (
     TOPICS,
+    fetch_citation_edges,
     fetch_paper_content,
     fetch_papers,
     get_paper_by_arxiv_id,
@@ -119,6 +121,8 @@ Rules:
 - Use "explain" when the user asks why these sources were used.
 - Use "saved_tags" when the user wants to save tags/notes or view stored tags/notes.
 - Use "trends" when the user asks what is changing over the last N days.
+- Use "lineage" when the user wants to explore citation graph, paper lineage, references,
+  or what a paper cites/is cited by.
 - Multi-step requests get multiple entries in "steps" (max {max_steps}).
 - If topics are not mentioned for a fetch, return an empty list (means fetch all).
 - If the request is unclear or unrelated, return {{"steps": [], "topics": [], "rag_query": ""}}.
@@ -959,6 +963,67 @@ def figures_node(state: SupervisorState) -> dict:
     return {"last_result": answer, "messages": [AIMessage(content=answer)]}
 
 
+def lineage_node(state: SupervisorState) -> dict:
+    """Fetch and display 1-hop citation graph for a pinned paper.
+
+    On first call for a paper, fetches reference and citation edges from
+    Semantic Scholar and caches them in citation_graph.db. Subsequent calls
+    for the same paper skip the API and read from the cache.
+    """
+    pinned = _get_pinned_paper(state)
+    if not pinned:
+        result = (
+            "Please specify a paper by its arXiv ID to explore its citation lineage "
+            "(e.g. 'show lineage for #2310.04451')."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    paper = get_paper_by_title(pinned)
+    if paper is None:
+        result = (
+            f"Could not find paper '{pinned}'. "
+            "Check the arXiv ID and ensure the paper has been fetched."
+        )
+        return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+    arxiv_id = paper.get("arxiv_id", "")
+    title = paper.get("title", pinned)
+    _log.info("[Supervisor] Fetching citation lineage for: %s", title)
+
+    if not has_edges(arxiv_id):
+        edges = fetch_citation_edges(arxiv_id)
+        upsert_edges(arxiv_id, edges["references"], "references")
+        upsert_edges(arxiv_id, edges["citations"], "citations")
+
+    refs = get_edges(arxiv_id, "references", limit=10)
+    cits = get_edges(arxiv_id, "citations", limit=10)
+
+    lines = [f"**Citation lineage for:** {title}\n"]
+
+    lines.append(f"**References** — papers this work builds on ({len(refs)} shown):")
+    if refs:
+        for i, e in enumerate(refs, 1):
+            t = e["title"] or "(untitled)"
+            lines.append(f"  {i}. {t} — arXiv:{e['cited_arxiv_id']}")
+    else:
+        lines.append("  (none found on arXiv)")
+
+    lines.append(f"\n**Cited by** — papers that build on this work ({len(cits)} shown):")
+    if cits:
+        for i, e in enumerate(cits, 1):
+            t = e["title"] or "(untitled)"
+            lines.append(f"  {i}. {t} — arXiv:{e['cited_arxiv_id']}")
+    else:
+        lines.append("  (none found on arXiv)")
+
+    lines.append(
+        "\n_Note: Only papers also on arXiv are shown. "
+        "Use #arxivId to fetch and search any of these._"
+    )
+    answer = "\n".join(lines)
+    return {"last_result": answer, "messages": [AIMessage(content=answer)]}
+
+
 _MAX_SUPERVISOR_MESSAGES = 20  # keep last N messages in the supervisor's conversation history
 
 
@@ -1016,6 +1081,8 @@ def _dispatch_intent(state: SupervisorState) -> str:
         return "diagram"
     if intent == "figures":
         return "figures"
+    if intent == "lineage":
+        return "lineage"
     return "clarify"
 
 
@@ -1081,6 +1148,7 @@ def _build_supervisor_graph(checkpointer=None):
     graph.add_node("trends", trends_node)
     graph.add_node("diagram", diagram_node)
     graph.add_node("figures", figures_node)
+    graph.add_node("lineage", lineage_node)
     graph.add_node("clarify", clarify_node)
     graph.add_node("finalize", finalize_node)
 
@@ -1102,6 +1170,7 @@ def _build_supervisor_graph(checkpointer=None):
         "trends",
         "diagram",
         "figures",
+        "lineage",
         "clarify",
     )
     for cap in _CAPS:

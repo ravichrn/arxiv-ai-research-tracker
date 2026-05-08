@@ -1,7 +1,8 @@
 .PHONY: lint test api ci-test
 
 lint:
-	uv run ruff check .
+	uv run ruff check --fix .
+	uv run ruff format .
 
 test:
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest evaluation/test_guardrails.py evaluation/test_feature_helpers.py evaluation/test_api.py -q

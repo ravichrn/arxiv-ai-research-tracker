@@ -55,9 +55,9 @@ def _answer(query: str, context: list[str]) -> str:
 
 
 def run_summarizer_eval(n_samples: int) -> dict | None:
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"SUMMARIZER EVAL  (n={n_samples} random DB papers)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     try:
         rows = papers_store.get_table().search().select(["text", "title"]).to_list()
@@ -92,9 +92,9 @@ def run_summarizer_eval(n_samples: int) -> dict | None:
 
 
 def run_rag_eval() -> dict | None:
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"RAG EVAL  ({len(RAG_CASES)} test queries)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     try:
         probe = papers_store.get_table().search().limit(1).to_list()
@@ -150,10 +150,10 @@ def run_adversarial_eval() -> dict | None:
     Expected outcome: faithfulness stays high (answer is grounded), relevancy is
     intentionally low (the corpus can't answer the question).
     """
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"ADVERSARIAL RAG EVAL  ({len(ADVERSARIAL_RAG_CASES)} cases)")
     print("  Purpose: context is off-topic — LLM must stay grounded, not hallucinate.")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     try:
         probe = papers_store.get_table().search().limit(1).to_list()
@@ -213,10 +213,10 @@ def run_no_context_baseline() -> dict | None:
     Expected outcome: faithfulness is undefined/low (no context to be faithful to),
     so we measure only relevancy — how well the LLM answers from prior knowledge alone.
     """
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("NO-CONTEXT BASELINE  (first 5 RAG queries, no retrieval)")
     print("  Purpose: quantify what retrieval adds over raw LLM knowledge.")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     relevancy = AnswerRelevancyMetric(threshold=0.7, model=_JUDGE, async_mode=False)
 
@@ -344,7 +344,7 @@ def main():
         out.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         print(f"\nWrote metrics JSON to {out}", flush=True)
 
-    print(f"\n{'='*60}\nEval complete.\n")
+    print(f"\n{'=' * 60}\nEval complete.\n")
 
 
 if __name__ == "__main__":

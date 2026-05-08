@@ -197,8 +197,8 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-#Claude context
-CLAUDE.md
+#.md files
+*.md
 
 # Local runtime state (do not commit)
 databases/agent_memory.db
@@ -208,7 +208,3 @@ databases/gateway_usage.db
 databases/llm_cache.db
 databases/embedding_cache/
 databases/lancedb/
-
-# Local Cursor session notes (do not commit)
-CURSOR_CHANGELOG.md
-CURSOR_CHANGELOG_SHORT.md

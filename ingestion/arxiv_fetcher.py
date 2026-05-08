@@ -691,3 +691,76 @@ def _embed_and_store(papers: list[dict]) -> int:
     invalidate_fts_index(papers_store)  # force FTS rebuild on next hybrid_search
     print(f"Indexed {len(papers)} papers ({len(docs)} chunks) into vector store.")
     return len(papers)
+
+
+_S2_PAPER_BASE = "https://api.semanticscholar.org/graph/v1/paper"
+
+
+def fetch_citation_edges(arxiv_id: str) -> dict[str, list[dict]]:
+    """Fetch 1-hop reference and citation lists for a paper from Semantic Scholar.
+
+    Returns {"references": [...], "citations": [...]} where each entry is
+    {"cited_arxiv_id": str, "title": str | None}. Entries without an arXiv ID
+    (non-arXiv papers) are omitted. Returns empty lists on any failure.
+    """
+    base_id = _base_arxiv_id(arxiv_id)
+    result: dict[str, list[dict]] = {"references": [], "citations": []}
+
+    for direction, field in (("references", "references"), ("citations", "citations")):
+        url = f"{_S2_PAPER_BASE}/arXiv:{base_id}/{field}"
+        try:
+            resp = requests.get(
+                url,
+                params={"fields": "title,externalIds", "limit": 50},
+                timeout=20,
+            )
+            if resp.status_code == 404:
+                _log.warning("[S2] paper not found in S2 for arXiv:%s (%s)", base_id, direction)
+            elif resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 60))
+                _log.warning(
+                    "[S2] rate-limited fetching %s edges — waiting %ds", direction, retry_after
+                )
+                time.sleep(retry_after)
+            elif resp.status_code == 200:
+                data = resp.json().get("data", [])
+                for item in data:
+                    # References wrap the target under "citedPaper"; citations under "citingPaper"
+                    paper_obj = (
+                        item.get("citedPaper")
+                        if direction == "references"
+                        else item.get("citingPaper")
+                    )
+                    if not paper_obj:
+                        continue
+                    ext_ids = paper_obj.get("externalIds") or {}
+                    raw_id = ext_ids.get("ArXiv")
+                    if not raw_id:
+                        continue
+                    result[direction].append(
+                        {
+                            "cited_arxiv_id": _base_arxiv_id(raw_id),
+                            "title": paper_obj.get("title"),
+                        }
+                    )
+            else:
+                _log.warning(
+                    "[S2] unexpected status %d fetching %s edges for %s",
+                    resp.status_code,
+                    direction,
+                    base_id,
+                )
+        except Exception as exc:
+            _log.warning("[S2] failed to fetch %s edges for %s: %s", direction, base_id, exc)
+
+        # Polite delay between the two requests to avoid rate limiting
+        if direction == "references":
+            time.sleep(1.0)
+
+    _log.info(
+        "[S2] citation edges for %s: %d references, %d citations",
+        base_id,
+        len(result["references"]),
+        len(result["citations"]),
+    )
+    return result
