@@ -26,11 +26,7 @@ A research assistant that fetches the latest AI papers from arXiv, indexes them 
 | **CLI** | Interactive supervisor — type plain English, see routing logs, and get streaming output where supported. |
 | **HTTP API** | The same supervisor behind FastAPI: JSON chat, SSE streaming, `/health`, and OpenAPI docs at `/docs`. |
 
-Both surfaces share the same tool calls, conversation memory, the same `hybrid_search()` retrieval helper (dense + BM25 + rerank), and guardrails.
-
 ### Multi-agent supervisor
-
-Describe what you want in natural language. The supervisor routes your message to the right agent and can chain multiple steps in one turn.
 
 | Capability | Example | What happens |
 | --- | --- | --- |
@@ -84,10 +80,6 @@ Answers open-ended research questions over your local corpus using a multi-step 
 - **Grafana dashboard** (`grafana/dashboard.json`) — pre-built panels auto-provisioned on `docker compose --profile monitoring up`. Panels target `prometheus-fastapi-instrumentator` defaults (`http_requests_total` with grouped `status` labels like `2xx` / `5xx`, and `http_request_duration_seconds`).
 - **Structured JSON logs** — all log output is machine-parseable (compatible with Datadog, CloudWatch, etc.).
 - **Rate limiting** — `/chat` and `/chat/stream` are capped at 20 requests/minute per IP (HTTP 429 on excess).
-
-### LLM inference benchmarking (separate repo)
-
-Tiered routing, cost/latency benchmarks, and optional standalone gateway live in **`llm-inference-benchmarking`** (sibling repository). This app uses `llm_agent` / `llm_fast` from `databases/stores.py` only.
 
 ### Conversation memory
 
@@ -179,10 +171,7 @@ After starting the server, open **`http://localhost:8000/docs`** for interactive
 uv run uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-API prerequisites:
-- Set `OPENAI_API_KEY` in `.env`, or
-- Run with local Ollama (`docker compose --profile local-llm up --build`) and ensure Ollama is reachable.
-- Without either provider, `/chat` and `/chat/stream` will return provider connection errors.
+Requires `OPENAI_API_KEY` in `.env`, or local Ollama (`docker compose --profile local-llm up --build`).
 
 One-line chat request:
 
@@ -222,14 +211,7 @@ docker compose --profile monitoring up
 
 Grafana’s default login is **`admin` / `admin`** unless you set **`GF_SECURITY_ADMIN_PASSWORD`** in `.env` (recommended outside local sandboxes).
 
-Make targets:
-
-```bash
-make lint
-make test
-make api
-make ci-test
-```
+Make targets: `make lint` · `make test` · `make ci-test` · `make api` (starts the server).
 
 Type `exit` or `quit` to stop. Use `ollama pull llama3.2` for local summarization.
 
@@ -237,24 +219,7 @@ Type `exit` or `quit` to stop. Use `ollama pull llama3.2` for local summarizatio
 
 ## Sample terminal session
 
-The supervisor prints routing logs, then either streams model tokens (for long-form
-nodes) or prints a final block when the turn completes. A longer illustrative
-transcript lives in [`docs/sample_terminal_session.txt`](docs/sample_terminal_session.txt).
-
-```text
-You: fetch recent cs.CL papers
-  [Supervisor] intent=fetch, chain=[], topics=['cs.CL']
-Fetched and indexed 12 new paper(s) for: cs.CL. You can now search them.
-
-You: find papers on retrieval-augmented generation
-  [Supervisor] intent=rag, chain=[], topics=[]
-Agent: ... grounded answer with inline citations ...
-
-You: summarize recent cs.CL papers
-Agent: - Paper A: ...   (tokens stream here in the real CLI)
-
-You: exit
-```
+An illustrative transcript is in [`docs/sample_terminal_session.txt`](docs/sample_terminal_session.txt). The supervisor prints routing logs (`[Supervisor] intent=...`), then streams model tokens or prints a final block when the turn completes.
 
 ---
 
@@ -262,59 +227,22 @@ You: exit
 
 ### Reported benchmark scores (pinned snapshot)
 
-These means come from a single local run of `evaluation.run_eval` (DeepEval
-metrics). Raw numbers and metadata are committed in
-[`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json).
-Re-run and replace that file when you change models, judges, or corpus.
+Scores from a single local run of `evaluation.run_eval` (DeepEval). Raw data: [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json) — re-run and replace when you change models, judges, or corpus.
 
-Faithfulness and relevancy use the **judge** LLM, not deterministic code. If the
-judge is the **same** model as the one that wrote the answers (`OPENAI_MODEL`),
-scores tend to look unrealistically high; this repo defaults the OpenAI judge to
-**`gpt-4o`** when `EVAL_JUDGE=openai` so a typical **`gpt-5.4`** agent is graded
-cross-model. Use `EVAL_JUDGE=prometheus` or `claude` for stronger separation.
+> Use `EVAL_JUDGE=prometheus` or `claude` to grade cross-model (same-model judging inflates scores). Adversarial relevancy is expected to be low — the model should refuse to fabricate rather than answer off-topic queries.
 
 | Suite | Faithfulness (mean) | Answer relevancy (mean) | Cases scored | Judge |
 | --- | ---: | ---: | ---: | --- |
 | RAG (`RAG_CASES`) | **0.921** | **0.712** | 10 | `openai/gpt-4o` |
 | Adversarial RAG (`ADVERSARIAL_RAG_CASES`) | **1.000** | **0.362** | 3 | `openai/gpt-4o` |
 
-Notes:
-- Scores were captured with `gpt-4o` judging answers from a different agent model to avoid same-model inflation. If your `.env` uses the same model for both agent and judge, scores will skew high — use `EVAL_JUDGE=prometheus` or `claude` for separation.
-- Adversarial answer relevancy is expected to be low when retrieval is intentionally off-topic; faithfulness should remain high if the model refuses to fabricate.
-- The summarizer hallucination metric requires papers to be indexed first — run `main.py` and fetch at least one topic before evaluating.
-
 ```bash
 uv run python -m evaluation.run_eval                   # all suites
-uv run python -m evaluation.run_eval --suite rag       # RAG only
-uv run python -m evaluation.run_eval --suite adversarial
-
-# Pin a cross-model judge and write updated scores to the snapshot file:
+uv run python -m evaluation.run_eval --suite rag
 EVAL_JUDGE=openai EVAL_JUDGE_MODEL=gpt-4o \
   uv run python -m evaluation.run_eval --suite all --write-metrics evaluation/eval_metrics_snapshot.json
-
-uv run pytest evaluation/                              # pytest suite
+uv run pytest evaluation/                              # pytest suite (no API key needed)
 ```
-
-After a successful run, the runner prints an `EVAL_SUMMARY` block you can use to refresh the table above. `evaluation/test_api.py` stubs the supervisor and validates endpoint behavior without requiring a live model or API key.
-
-**Judge model** — set `EVAL_JUDGE` in `.env`:
-
-| `EVAL_JUDGE` | Judge | Cost |
-|---|---|---|
-| `prometheus` | Prometheus 2 via Ollama | Free (local) |
-| `claude` | `claude-opus-4-6` | ~$6–10/run |
-| `openai` | `gpt-4o` (default judge; differs from typical agent model) | ~$1–3/run |
-
----
-
-## Tracing with LangSmith
-
-Add to `.env`:
-```env
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=your_key_here
-```
-All LLM calls and agent steps appear in the LangSmith dashboard automatically.
 
 ---
 
@@ -326,12 +254,12 @@ All user input and retrieved content passes through `guardrails/sanitizer.py`: p
 
 ## API Keys
 
-| Provider | URL |
-|----------|-----|
-| OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
-| Anthropic | [console.anthropic.com](https://console.anthropic.com) |
-| LangSmith | [smith.langchain.com](https://smith.langchain.com) |
-| Ollama (local) | [ollama.com](https://ollama.com) — no key needed |
+| Provider | URL | Notes |
+|----------|-----|-------|
+| OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | |
+| Anthropic | [console.anthropic.com](https://console.anthropic.com) | |
+| LangSmith | [smith.langchain.com](https://smith.langchain.com) | Set `LANGCHAIN_TRACING_V2=true` + `LANGCHAIN_API_KEY` to trace all LLM calls |
+| Ollama (local) | [ollama.com](https://ollama.com) | No key needed |
 
 ---
 
