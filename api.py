@@ -43,9 +43,7 @@ _log = logging.getLogger(__name__)
 try:
     _MODEL_INFO = Info("agent_llm", "Active agent LLM configuration")
 except ValueError:
-    from prometheus_client import REGISTRY
-
-    _MODEL_INFO = REGISTRY._names_to_collectors.get("agent_llm_info")  # type: ignore[assignment]
+    _MODEL_INFO = None  # already registered from a previous import; metrics still exported
 
 _limiter = Limiter(key_func=get_remote_address)
 
@@ -208,10 +206,9 @@ def chat_stream(request: Request, req: ChatRequest) -> StreamingResponse:
                     yield f"data: {line}\n"
                 yield "\n"
             yield "event: done\ndata: [DONE]\n\n"
-        except InputRejected as exc:
-            yield f"event: error\ndata: {exc}\n\n"
-        except ValueError as exc:
-            yield f"event: error\ndata: {exc}\n\n"
+        except (InputRejected, ValueError) as exc:
+            _log.warning("Rejected input in /chat/stream: %s", exc)
+            yield "event: error\ndata: Invalid request\n\n"
         except Exception:
             _log.exception("Unhandled error in /chat/stream")
             yield "event: error\ndata: Internal server error\n\n"

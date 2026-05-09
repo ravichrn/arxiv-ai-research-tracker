@@ -265,11 +265,7 @@ def _rerank(query: str, docs: list) -> list:
     except Exception as e:
         _reranker = None  # allow re-init on next attempt
         _reranker_failed_until = time.monotonic() + _RERANKER_RETRY_AFTER
-        _log.warning("[Reranker] skipped: %s", e)
-        print(
-            f"[Reranker] WARNING: cross-encoder unavailable ({e});"
-            f"retrying in {_RERANKER_RETRY_AFTER}s."
-        )
+        _log.warning("[Reranker] skipped: %s — retrying in %ss", e, _RERANKER_RETRY_AFTER)
         return docs
 
 
