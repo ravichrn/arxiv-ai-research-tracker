@@ -7,83 +7,71 @@ A research assistant that fetches the latest AI papers from arXiv, indexes them 
 | Vector store & retrieval | LanceDB · OpenAI embeddings · dense + BM25 hybrid retrieval (RRF merge) · cross-encoder reranking |
 | Agent framework | LangGraph (supervisor + Self-RAG) · LangChain tools |
 | API | FastAPI · Pydantic · SSE streaming |
-| Data sources | arXiv API · Semantic Scholar batch API |
 | LLM support | OpenAI · Anthropic Claude · Ollama (local) · vLLM (GPU serving) |
-| Model serving | vLLM OpenAI-compatible API · pluggable via `AGENT_LLM` env var |
 | Observability | Prometheus `/metrics` · Grafana dashboard · structured JSON logs |
 | Evaluation | DeepEval · LangSmith tracing |
 | Storage | SQLite (cache, memory, metadata) · NDJSON · diskcache |
-| Tooling | uv · Ruff · pytest · Docker Compose |
 
 ---
 
 ## Features
 
-### Interfaces
-
-| Surface | What you get |
-| --- | --- |
-| **CLI** | Interactive supervisor — type plain English, see routing logs, and get streaming output where supported. |
-| **HTTP API** | The same supervisor behind FastAPI: JSON chat, SSE streaming, `/health`, and OpenAPI docs at `/docs`. |
-
 ### Multi-agent supervisor
 
 | Capability | Example | What happens |
 | --- | --- | --- |
-| **Ingest** | *”Fetch recent NLP papers”* | Pulls new papers from arXiv, embeds, and indexes them. Incremental — only fetches what's new. |
-| **Library** | *”List saved papers”* | Shows your saved collection with arXiv IDs, citation counts, and one-sentence TLDRs. |
-| **Search & Q&A** | *”Find papers on diffusion models”*, *”Find JEPA paper by Yann LeCun”* | Local vector search first (oversampled, reranked); falls back to live arXiv search if nothing is indexed — results are automatically saved and indexed for future queries. Each result shows its `#arxiv_id` for immediate follow-up commands. |
-| **Summarize** | *”Summarize recent robotics work”*, *”Summarize #2504.08123v2”* | Batch or single-paper summarization. |
-| **Compare** | *”Compare #2301.12345 and #2504.08123”* | Side-by-side comparison: motivation, approach, limitations, and a verdict. |
-| **Themes** | *”Tag papers”* | Groups your collection into named research themes. |
-| **Reading aids** | *”Diagram #…”*, *”Get figures from #…”* | Mermaid methodology diagram from the abstract, or real figures extracted from the paper. |
-| **Digest** | *”Daily digest”*, *”Digest last 14 days”* | Newsletter-style summary grouped by research area, with optional email delivery. |
-| **Export** | *”Export saved --bibtex”*, *”Trends last 14 days”* | Deterministic BibTeX/CSV export, source attribution for the last answer, or category trend analysis. |
-| **Tags & notes** | *”Save tag #… diffusion”*, *”Show tags #…”* | Attach personal tags and notes to papers; influences future retrieval ranking. |
-| **Chaining** | *”Fetch new ML papers then find the best ones on LLMs”* | Multiple steps run in sequence within a single turn. |
+| **Ingest** | *"Fetch recent NLP papers"* | Pulls new papers from arXiv, embeds, and indexes them. Incremental — only fetches what's new. |
+| **Library** | *"List saved papers"* | Shows your saved collection with arXiv IDs, citation counts, and one-sentence TLDRs. |
+| **Search & Q&A** | *"Find papers on diffusion models"* | Local vector search first (oversampled, reranked); falls back to live arXiv if nothing is indexed — results are saved and indexed automatically. |
+| **Summarize** | *"Summarize recent robotics work"*, *"Summarize #2504.08123v2"* | Batch or single-paper summarization. |
+| **Compare** | *"Compare #2301.12345 and #2504.08123"* | Side-by-side comparison: motivation, approach, limitations, and a verdict. |
+| **Themes** | *"Tag papers"* | Groups your collection into named research themes. |
+| **Reading aids** | *"Diagram #…"*, *"Get figures from #…"* | Mermaid methodology diagram from the abstract, or real figures extracted from the paper. |
+| **Digest** | *"Daily digest"*, *"Digest last 14 days"* | Newsletter-style summary grouped by research area. |
+| **Export** | *"Export saved --bibtex"*, *"Trends last 14 days"* | Deterministic BibTeX/CSV export or category trend analysis. |
+| **Tags & notes** | *"Save tag #… diffusion"* | Attach personal tags and notes to papers — influences future retrieval ranking. |
+| **Chaining** | *"Fetch new ML papers then find the best ones on LLMs"* | Multiple steps run in sequence within a single turn. |
 
-### Self-RAG (retrieval-augmented Q&A)
+### Self-RAG
 
-Answers open-ended research questions over your local corpus using a multi-step verification loop:
-
-1. Retrieves candidate chunks via `hybrid_search()` (dense + BM25 via RRF, then cross-encoder rerank).
-2. Grades each chunk for relevance — weak results are dropped before generation.
-3. Drafts an answer grounded only on the kept context.
-4. Checks the answer for hallucinations; rewrites the query and retries if grounding fails.
-5. Returns a **Sources** block (arXiv IDs + titles) for verification.
+Multi-step verification loop: retrieves chunks via `hybrid_search()` → grades relevance → drafts a grounded answer → checks for hallucinations (rewrites and retries if grounding fails) → returns a **Sources** block (arXiv IDs + titles).
 
 ### Retrieval and reranking
 
-- **Dense vector search** (OpenAI embeddings) and **BM25 full-text search** run in parallel against the raw LanceDB table (bypassing LangChain’s broken `query_type="hybrid"` path, which is incompatible with LanceDB ≥0.30).
-- Results are merged with **Reciprocal Rank Fusion** (RRF) — a document that ranks highly in both lists gets a boosted combined score.
-- **Cross-encoder reranking** on the merged shortlist for a final precision pass.
-- Chunk oversampling (3× k before dedupe) then **deduplication per paper** (by URL) before reranking.
-- Optional arXiv category filter; saved tags influence ranking when they overlap the query.
-
-### Ingestion pipeline
-
-- **Incremental** — per-topic timestamps ensure only newly published papers are fetched on each run; no duplicates.
-- **Semantic Scholar enrichment** — a single batch request at fetch time adds a one-sentence TLDR, citation count, and fields of study.
-- **Canonical IDs** — papers are assigned stable arXiv IDs (e.g. `2504.08123v2`) usable across the CLI and API.
+Dense vector search (OpenAI embeddings) and BM25 run in parallel, merged with **Reciprocal Rank Fusion** (RRF), then reranked with a **cross-encoder** for a final precision pass. LangChain's built-in hybrid path is bypassed — it's incompatible with LanceDB ≥0.30. Saved tags influence ranking when they overlap the query.
 
 ### Model serving and caching
 
-- **Pluggable backends** — set `AGENT_LLM` in `.env` to switch between `openai`, `claude`, `ollama`, or `vllm`. vLLM runs any HuggingFace model locally via GPU with an OpenAI-compatible API.
-- **Summarizer** — prefers **Ollama** (`llama3.2` by default) when reachable; otherwise OpenAI **gpt-4o-mini**.
-- **LLM response cache** (SQLite) and **embedding disk cache** (30-day TTL) reduce repeat cost.
-- **Prompt caching** — Anthropic beta header added automatically when `AGENT_LLM=claude`.
-- **Streaming** — `summarize`, `clarify`, `compare`, `tag`, `digest`, `diagram`, and `figures` stream tokens in the CLI; the API exposes the same supervisor via **SSE** on `/chat/stream`.
+Set `AGENT_LLM` in `.env` to switch between `openai`, `claude`, `ollama`, or `vllm`. Summarizer prefers local Ollama; falls back to `gpt-4o-mini`. Three-layer caching: LLM responses (SQLite), embeddings (disk, 30-day TTL), citation edges (SQLite). Streaming supported across all major tools via SSE.
 
 ### Observability
 
-- **Prometheus metrics** at `GET /metrics` — request count, p50/p95 latency, and error rate per endpoint.
-- **Grafana dashboard** (`grafana/dashboard.json`) — pre-built panels auto-provisioned on `docker compose --profile monitoring up`. Panels target `prometheus-fastapi-instrumentator` defaults (`http_requests_total` with grouped `status` labels like `2xx` / `5xx`, and `http_request_duration_seconds`).
-- **Structured JSON logs** — all log output is machine-parseable (compatible with Datadog, CloudWatch, etc.).
-- **Rate limiting** — `/chat` and `/chat/stream` are capped at 20 requests/minute per IP (HTTP 429 on excess).
+Prometheus metrics at `/metrics` · Grafana dashboard (auto-provisioned) · structured JSON logs · rate limiting (20 req/min per IP). Conversation state checkpointed to SQLite — sessions survive restarts.
 
-### Conversation memory
+### Security
 
-Conversation state is checkpointed to SQLite so sessions survive restarts. Use `new session` or `reset` in the CLI to start a fresh thread.
+All user input passes through `guardrails/sanitizer.py`: prompt-injection patterns, jailbreak triggers, role overrides, and exfiltration-style content (20+ rules, Unicode normalization). Queries over 500 characters are rejected; the API returns HTTP 400 for invalid input.
+
+---
+
+## Evaluation
+
+Scored with [DeepEval](https://github.com/confident-ai/deepeval). Answer model: `gpt-5.4`. Judge: `claude-haiku-4-5` (cross-provider — avoids same-model inflation). Raw scores: [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json).
+
+| Suite | Faithfulness | Answer relevancy | n |
+| --- | ---: | ---: | ---: |
+| RAG | **0.992** ± 0.024 | **0.870** ± 0.241 | 10 |
+| Adversarial RAG | **0.952** ± 0.082 | **0.292** ± 0.505 | 3 |
+
+Adversarial relevancy is intentionally low — the model stays grounded and refuses off-topic queries rather than fabricate.
+
+```bash
+uv run python -m evaluation.run_eval --suite rag
+uv run python -m evaluation.run_eval --suite adversarial --write-metrics evaluation/eval_metrics_snapshot.json
+uv run pytest evaluation/   # deterministic tests, no API key needed
+```
+
+Configure judge in `.env`: `EVAL_JUDGE=openai|claude|prometheus`, `EVAL_JUDGE_MODEL=<model-name>`.
 
 ---
 
@@ -91,42 +79,15 @@ Conversation state is checkpointed to SQLite so sessions survive restarts. Use `
 
 ```
 arxiv-ai-research-tracker/
-├── main.py                    # Entry point — calls launch_supervisor()
-├── api.py                     # FastAPI: /health, /models, /metrics, /chat, /chat/stream (SSE)
-├── agents/
-│   ├── supervisor.py          # Multi-agent supervisor: routes all intents, supports chaining
-│   ├── runner.py              # Self-RAG LangGraph agent (grade_docs → agent → hallucination_check)
-│   └── tools.py               # search_papers, search_saved_papers, add/delete saved
-├── ingestion/
-│   └── arxiv_fetcher.py       # arXiv fetching, incremental sync, S2 enrichment, figure extraction
-├── databases/
-│   ├── stores.py              # LanceDB stores, hybrid search, LLM singletons, caching
-│   ├── export_utils.py        # Deterministic BibTeX/CSV export (no LLM)
-│   ├── interest_rerank.py     # Interest-aware reranking via saved tags
-│   ├── saved_metadata.py      # SQLite side-table for user tags/notes
-│   ├── trends_utils.py        # Category trend analysis over time windows
-│   ├── papers_raw.jsonl       # NDJSON cache of all fetched paper metadata
-│   └── last_run.txt           # Per-topic fetch timestamps (JSON)
-├── guardrails/
-│   └── sanitizer.py           # Prompt injection prevention
-├── evaluation/
-│   ├── datasets.py            # Test cases (summarizer + RAG)
-│   ├── eval_metrics_snapshot.json  # Pinned mean scores for README (regenerate locally)
-│   ├── run_eval.py            # Standalone eval runner
-│   ├── test_summarizer.py     # pytest — hallucination + summarization metrics
-│   ├── test_rag.py            # pytest — faithfulness + relevancy metrics
-│   ├── test_api.py            # pytest — FastAPI routes (stubbed supervisor)
-│   ├── test_guardrails.py     # pytest — sanitizer edge cases
-│   └── test_feature_helpers.py  # pytest — deterministic export/trends/sqlite helpers
-├── grafana/
-│   ├── dashboard.json         # Pre-built Grafana dashboard (request rate, latency, errors)
-│   ├── prometheus.yml         # Prometheus scrape config targeting the app
-│   └── provisioning/          # Auto-provisioned Grafana datasource + dashboard
-├── docs/
-│   └── sample_terminal_session.txt  # Illustrative CLI transcript
-├── prompts/
-│   └── summarize.txt          # Summarization prompt template
-└── pyproject.toml             # uv-managed dependencies
+├── main.py          # CLI entry point
+├── api.py           # FastAPI app — /health, /chat, /chat/stream, /metrics
+├── agents/          # LangGraph supervisor + Self-RAG runner + tools
+├── ingestion/       # arXiv fetching, incremental sync, Semantic Scholar enrichment
+├── databases/       # LanceDB stores, hybrid search, caching, export utils
+├── guardrails/      # Prompt injection sanitizer
+├── evaluation/      # DeepEval metrics, test datasets, pytest suites, snapshot
+├── grafana/         # Pre-built dashboard + Prometheus scrape config
+└── pyproject.toml
 ```
 
 ---
@@ -137,135 +98,50 @@ arxiv-ai-research-tracker/
 git clone https://github.com/ravichrn/arxiv-ai-research-tracker.git
 cd arxiv-ai-research-tracker
 uv sync
+cp .env.example .env
 ```
 
-Use Python 3.13 for local development (the current dependency set is not stable on Python 3.14).
-
-Create a `.env` file using `.env.example` as a reference.
+Requires Python 3.13. See `.env.example` for all configuration options.
 
 ---
 
 ## Usage
 
-### CLI (interactive supervisor)
+### CLI
 
 ```bash
 uv run python main.py
 ```
 
-### HTTP API (FastAPI)
+### HTTP API
 
-`api.py` defines a **[FastAPI](https://fastapi.tiangolo.com/)** application (`app`) served with **Uvicorn**. It wraps the same supervisor as the CLI: **Pydantic**-validated JSON bodies, OpenAPI schema, and optional **LangSmith** traces for requests that hit the LLM.
+Same supervisor behind FastAPI — Pydantic-validated JSON, OpenAPI docs at `/docs`, optional LangSmith tracing.
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
-| `/health` | GET | Liveness — returns `{"status":"ok","backend":"...","model":"..."}`. |
-| `/models` | GET | Active LLM backend and model names. |
-| `/metrics` | GET | Prometheus metrics (request count, latency, error rate). |
-| `/chat` | POST | One full supervisor turn; JSON body `{"query":"...","thread_id":"..."}`. |
-| `/chat/stream` | POST | Same as `/chat` but streams **Server-Sent Events** (`text/event-stream`); ends with `event: done`. |
-
-After starting the server, open **`http://localhost:8000/docs`** for interactive **Swagger UI** (try requests from the browser) or **`http://localhost:8000/redoc`** for ReDoc.
+| `/health` | GET | Liveness check |
+| `/models` | GET | Active LLM backend and model |
+| `/metrics` | GET | Prometheus metrics |
+| `/chat` | POST | One supervisor turn — `{"query":"...","thread_id":"..."}` |
+| `/chat/stream` | POST | SSE streaming version of `/chat` |
 
 ```bash
 uv run uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-Requires `OPENAI_API_KEY` in `.env`, or local Ollama (`docker compose --profile local-llm up --build`).
-
-One-line chat request:
+### Docker Compose
 
 ```bash
-curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query":"find papers on diffusion models","thread_id":"demo"}'
+docker compose up --build                           # app only
+docker compose --profile local-llm up --build      # with local Ollama
+docker compose --profile vllm up --build           # with vLLM GPU serving
+docker compose --profile monitoring up             # with Prometheus + Grafana
 ```
 
-One-line streaming chat request (SSE):
-
-```bash
-curl -N -X POST http://localhost:8000/chat/stream -H "Content-Type: application/json" -d '{"query":"summarize recent cs.AI papers","thread_id":"demo"}'
-```
-
-Run with Docker Compose:
-
-```bash
-docker compose up --build
-```
-
-Run with optional local Ollama sidecar:
-
-```bash
-docker compose --profile local-llm up --build
-```
-
-Run with vLLM GPU model serving:
-
-```bash
-AGENT_LLM=vllm docker compose --profile vllm up --build
-```
-
-Run with Prometheus + Grafana monitoring (dashboard at `http://localhost:3000`, Prometheus UI at `http://localhost:9090`):
-
-```bash
-docker compose --profile monitoring up
-```
-
-Grafana’s default login is **`admin` / `admin`** unless you set **`GF_SECURITY_ADMIN_PASSWORD`** in `.env` (recommended outside local sandboxes).
-
-Make targets: `make lint` · `make test` · `make ci-test` · `make api` (starts the server).
-
-Type `exit` or `quit` to stop. Use `ollama pull llama3.2` for local summarization.
+Make targets: `make lint` · `make test` · `make ci-test` · `make api`.
 
 ---
 
 ## Sample terminal session
 
 An illustrative transcript is in [`docs/sample_terminal_session.txt`](docs/sample_terminal_session.txt). The supervisor prints routing logs (`[Supervisor] intent=...`), then streams model tokens or prints a final block when the turn completes.
-
----
-
-## Evaluation
-
-### Reported benchmark scores (pinned snapshot)
-
-Scores from a single local run of `evaluation.run_eval` (DeepEval). Raw data: [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json) — re-run and replace when you change models, judges, or corpus.
-
-> Use `EVAL_JUDGE=prometheus` or `claude` to grade cross-model (same-model judging inflates scores). Adversarial relevancy is expected to be low — the model should refuse to fabricate rather than answer off-topic queries.
-
-| Suite | Faithfulness (mean) | Answer relevancy (mean) | Cases scored | Judge |
-| --- | ---: | ---: | ---: | --- |
-| RAG (`RAG_CASES`) | **0.921** | **0.712** | 10 | `openai/gpt-4o` |
-| Adversarial RAG (`ADVERSARIAL_RAG_CASES`) | **1.000** | **0.362** | 3 | `openai/gpt-4o` |
-
-```bash
-uv run python -m evaluation.run_eval                   # all suites
-uv run python -m evaluation.run_eval --suite rag
-EVAL_JUDGE=openai EVAL_JUDGE_MODEL=gpt-4o \
-  uv run python -m evaluation.run_eval --suite all --write-metrics evaluation/eval_metrics_snapshot.json
-uv run pytest evaluation/                              # pytest suite (no API key needed)
-```
-
----
-
-## Security
-
-All user input and retrieved content passes through `guardrails/sanitizer.py`: prompt-injection patterns, jailbreak triggers, role overrides, and exfiltration-style content (20+ rules, Unicode normalization). Queries over 500 characters are rejected; the API returns HTTP 400 for invalid input. API keys are never hardcoded — loaded from `.env` only.
-
----
-
-## API Keys
-
-| Provider | URL | Notes |
-|----------|-----|-------|
-| OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | |
-| Anthropic | [console.anthropic.com](https://console.anthropic.com) | |
-| LangSmith | [smith.langchain.com](https://smith.langchain.com) | Set `LANGCHAIN_TRACING_V2=true` + `LANGCHAIN_API_KEY` to trace all LLM calls |
-| Ollama (local) | [ollama.com](https://ollama.com) | No key needed |
-
----
-
-## Future Enhancements
-
-- [ ] Graph RAG — knowledge graph over entities and relationships across papers
-- [ ] Web UI (Streamlit/Gradio or SPA) on top of the existing FastAPI `/chat` and `/chat/stream` endpoints
-- [ ] Full PDF analysis — fetch and analyze the complete paper, not just the abstract
-- [ ] Slack digest delivery (alongside existing email delivery)

@@ -339,7 +339,8 @@ def _fetch_papers_locked(max_per_topic: int = 20, topics: list[str] | None = Non
 
     # Count existing lines so we can atomically replace the file after S2 enrichment.
     if _RAW_PAPERS_FILE.exists():
-        original_line_count = sum(1 for _ in _RAW_PAPERS_FILE.open())
+        with _RAW_PAPERS_FILE.open() as _fh:
+            original_line_count = sum(1 for _ in _fh)
     else:
         original_line_count = 0
 

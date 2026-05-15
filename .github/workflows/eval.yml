@@ -30,3 +30,38 @@ jobs:
 
       - name: Run deterministic tests
         run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest evaluation/test_guardrails.py evaluation/test_feature_helpers.py evaluation/test_api.py -q
+
+      - name: Regression gate — check eval snapshot baselines
+        run: |
+          python - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          THRESHOLDS = {
+              "rag.faithfulness_mean": 0.85,
+              "rag.relevancy_mean": 0.60,
+              "adversarial.faithfulness_mean": 0.90,
+          }
+
+          snap = json.loads(Path("evaluation/eval_metrics_snapshot.json").read_text())
+          suites = snap.get("suites", {})
+          failed = []
+
+          for key, threshold in THRESHOLDS.items():
+              suite, metric = key.split(".", 1)
+              value = suites.get(suite, {}).get(metric)
+              if value is None:
+                  print(f"  [SKIP] {key} not in snapshot")
+                  continue
+              status = "PASS" if value >= threshold else "FAIL"
+              print(f"  [{status}] {key}: {value:.3f} (threshold={threshold})")
+              if value < threshold:
+                  failed.append(f"{key}={value:.3f} < {threshold}")
+
+          if failed:
+              print(f"\nRegression gate FAILED: {'; '.join(failed)}")
+              print("Re-run evaluation/run_eval.py and update eval_metrics_snapshot.json if scores legitimately changed.")
+              sys.exit(1)
+          else:
+              print("\nRegression gate passed.")
+          EOF

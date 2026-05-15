@@ -208,3 +208,4 @@ databases/gateway_usage.db
 databases/llm_cache.db
 databases/embedding_cache/
 databases/lancedb/
+INTERVIEW_GUIDE.md

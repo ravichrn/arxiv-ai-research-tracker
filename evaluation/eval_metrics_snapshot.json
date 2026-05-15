@@ -1,22 +1,32 @@
 {
-  "judge": "openai/gpt-4o",
+  "judge": "anthropic/claude-haiku-4-5-20251001",
   "answer_model": "openai/gpt-5.4",
+  "git_sha": "749faeb",
+  "timestamp": "2026-05-15T06:37:36.112026+00:00",
   "suites": {
     "rag": {
-      "faithfulness_mean": 0.9206349206349206,
-      "relevancy_mean": 0.712062509214212,
+      "faithfulness_mean": 0.9923076923076923,
+      "faithfulness_std": 0.02432521277052598,
+      "faithfulness_min": 0.9230769230769231,
+      "faithfulness_max": 1.0,
+      "relevancy_mean": 0.8699749373433584,
+      "relevancy_std": 0.24075962501223502,
+      "relevancy_min": 0.2857142857142857,
+      "relevancy_max": 1.0,
       "n_scored": 10,
       "n_skipped": 0
     },
     "adversarial": {
-      "faithfulness_mean": 1.0,
-      "relevancy_mean": 0.36195286195286197,
+      "faithfulness_mean": 0.9523809523809523,
+      "faithfulness_std": 0.08247860988423228,
+      "faithfulness_min": 0.8571428571428571,
+      "faithfulness_max": 1.0,
+      "relevancy_mean": 0.2916666666666667,
+      "relevancy_std": 0.5051814855409226,
+      "relevancy_min": 0.0,
+      "relevancy_max": 0.875,
       "n_scored": 3,
       "n_skipped": 0
-    },
-    "baseline_no_context": {
-      "relevancy_mean": 0.9947368421052631,
-      "n": 5
     }
   }
 }
