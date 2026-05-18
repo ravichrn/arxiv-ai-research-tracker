@@ -138,7 +138,8 @@ def _fetch_existing_urls() -> set[str]:
         table = papers_store.get_table()
         rows = table.search().select(["url"]).to_list()
         return {row["url"] for row in rows if row.get("url")}
-    except Exception:
+    except Exception as exc:
+        _log.warning("[DB] could not fetch existing URLs from LanceDB: %s", exc)
         return set()
 
 
@@ -504,7 +505,8 @@ def fetch_paper_content(arxiv_id: str, pdf_url: str) -> dict | None:
             import fitz  # lazy import (pymupdf)
 
             doc = fitz.open(stream=pdf_resp.content, filetype="pdf")
-            out_dir = _DB_DIR / "paper_figures" / arxiv_id
+            safe_id = re.sub(r"[^\w.\-]", "_", arxiv_id) or "unknown"
+            out_dir = _DB_DIR / "paper_figures" / safe_id
             out_dir.mkdir(parents=True, exist_ok=True)
             figures = []
             for page_num in range(len(doc)):
@@ -557,7 +559,10 @@ def enrich_with_s2(papers: list[dict]) -> list[dict]:
     try:
         resp = _s2_post(ids)
         if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 60))
+            try:
+                retry_after = min(int(resp.headers.get("Retry-After", 60)), 300)
+            except (ValueError, TypeError):
+                retry_after = 60
             print(f"[S2] rate-limited — waiting {retry_after}s before giving up.")
             time.sleep(retry_after)
             print("[S2] enrichment skipped: rate limit not resolved.")
@@ -573,7 +578,7 @@ def enrich_with_s2(papers: list[dict]) -> list[dict]:
         # Build lookup: base arXiv ID → S2 record
         s2_by_id: dict[str, dict] = {}
         for record in results:
-            if not record:
+            if not record or not isinstance(record, dict):
                 continue
             ext_ids = record.get("externalIds") or {}
             arxiv_raw = ext_ids.get("ArXiv") or ""
@@ -617,7 +622,7 @@ def save_and_index_papers(papers: list[dict]) -> list[dict]:
     """
     if not papers:
         return []
-    known_urls = _load_raw_urls()
+    known_urls = _load_raw_urls() | _fetch_existing_urls()
     new_papers = [p for p in papers if p.get("url") and p["url"] not in known_urls]
     if not new_papers:
         return []
@@ -688,6 +693,13 @@ def _embed_and_store(papers: list[dict]) -> int:
                     },
                 )
             )
+    for paper in papers:
+        url = paper.get("url", "")
+        if url:
+            try:
+                papers_store.get_table().delete(f"url = '{url}'")
+            except Exception as exc:
+                _log.debug("[embed] could not delete old chunks for %s (first run?): %s", url, exc)
     papers_store.add_documents(docs)
     invalidate_fts_index(papers_store)  # force FTS rebuild on next hybrid_search
     print(f"Indexed {len(papers)} papers ({len(docs)} chunks) into vector store.")
@@ -718,7 +730,10 @@ def fetch_citation_edges(arxiv_id: str) -> dict[str, list[dict]]:
             if resp.status_code == 404:
                 _log.warning("[S2] paper not found in S2 for arXiv:%s (%s)", base_id, direction)
             elif resp.status_code == 429:
-                retry_after = int(resp.headers.get("Retry-After", 60))
+                try:
+                    retry_after = min(int(resp.headers.get("Retry-After", 60)), 300)
+                except (ValueError, TypeError):
+                    retry_after = 60
                 _log.warning(
                     "[S2] rate-limited fetching %s edges — waiting %ds", direction, retry_after
                 )

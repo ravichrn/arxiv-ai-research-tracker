@@ -69,7 +69,8 @@ class _CachedEmbeddings(Embeddings):
     )
     def _embed_many_docs(self, texts: list[str]) -> list[list[float]]:
         """Embed many documents in one call (preserves input order)."""
-        assert self._base is not None
+        if self._base is None:
+            raise RuntimeError("Embeddings not initialized — call _init() first")
         return self._base.embed_documents(texts)
 
     @retry(
@@ -79,12 +80,14 @@ class _CachedEmbeddings(Embeddings):
         reraise=True,
     )
     def _embed_one_query(self, text: str) -> list[float]:
-        assert self._base is not None
+        if self._base is None:
+            raise RuntimeError("Embeddings not initialized — call _init() first")
         return self._base.embed_query(text)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         self._init()
-        assert self._cache is not None
+        if self._cache is None:
+            raise RuntimeError("Embedding cache not initialized — call _init() first")
         results: list[list[float] | None] = [None] * len(texts)
 
         # Cache key per text (so repeated inputs within one call don't re-embed).
@@ -112,7 +115,8 @@ class _CachedEmbeddings(Embeddings):
                     results[idx] = list(emb)
 
         # All cache misses are filled above; keep output length stable.
-        assert all(r is not None for r in results)
+        if not all(r is not None for r in results):
+            raise RuntimeError("Embedding cache returned None for one or more inputs")
         return [r for r in results]  # type: ignore[return-value]
 
     def embed_query(self, text: str) -> list[float]:

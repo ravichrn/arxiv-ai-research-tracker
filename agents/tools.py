@@ -11,45 +11,61 @@ from guardrails.sanitizer import sanitize_retrieved
 _SAFE_URL_RE = re.compile(r"^https?://[a-zA-Z0-9._/:\-]+$")
 
 
+def _format_paper(
+    arxiv_id: str,
+    title: str,
+    authors: str,
+    categories: str,
+    published: str,
+    url: str,
+    abstract: str,
+) -> str:
+    pin_hint = f"  (use #{arxiv_id} for follow-up commands)" if arxiv_id else ""
+    return (
+        f"ArXiv ID : #{arxiv_id}{pin_hint}\n"
+        f"Title    : {sanitize_retrieved(title)}\n"
+        f"Authors  : {sanitize_retrieved(authors)}\n"
+        f"Topics   : {categories or 'N/A'}\n"
+        f"Published: {published or 'N/A'}\n"
+        f"URL      : {sanitize_retrieved(url)}\n"
+        f"\nAbstract : {sanitize_retrieved(abstract)}"
+    )
+
+
 def _format_docs(docs) -> str:
     if not docs:
         return "No relevant papers found."
-    results = []
-    for doc in docs:
-        meta = doc.metadata
-        arxiv_id = meta.get("arxiv_id", "")
-        pin_hint = f"  (use #{arxiv_id} for follow-up commands)" if arxiv_id else ""
-        results.append(
-            f"ArXiv ID : #{arxiv_id}{pin_hint}\n"
-            f"Title    : {sanitize_retrieved(str(meta.get('title', '')))}\n"
-            f"Authors  : {sanitize_retrieved(str(meta.get('authors', '')))}\n"
-            f"Topics   : {meta.get('categories', 'N/A')}\n"
-            f"Published: {meta.get('published', 'N/A')}\n"
-            f"URL      : {sanitize_retrieved(str(meta.get('url', '')))}\n"
-            f"\nAbstract : {sanitize_retrieved(str(doc.page_content))}"
+    return "\n\n".join(
+        _format_paper(
+            doc.metadata.get("arxiv_id", ""),
+            str(doc.metadata.get("title", "")),
+            str(doc.metadata.get("authors", "")),
+            doc.metadata.get("categories", ""),
+            doc.metadata.get("published", ""),
+            str(doc.metadata.get("url", "")),
+            str(doc.page_content),
         )
-    return "\n\n".join(results)
+        for doc in docs
+    )
 
 
 def _format_live_results(papers: list[dict], source_label: str = "arXiv (live)") -> str:
     """Format raw paper dicts from a live arXiv search the same way as _format_docs."""
     if not papers:
         return "No relevant papers found on arXiv."
-    results = []
-    for p in papers:
-        arxiv_id = p.get("arxiv_id", "")
-        pin_hint = f"  (use #{arxiv_id} for follow-up commands)" if arxiv_id else ""
-        results.append(
-            f"ArXiv ID : #{arxiv_id}{pin_hint}\n"
-            f"Title    : {sanitize_retrieved(p.get('title', ''))}\n"
-            f"Authors  : {sanitize_retrieved(p.get('authors', ''))}\n"
-            f"Topics   : {p.get('categories', 'N/A')}\n"
-            f"Published: {p.get('published', 'N/A')}\n"
-            f"URL      : {sanitize_retrieved(p.get('url', ''))}\n"
-            f"\nAbstract : {sanitize_retrieved(p.get('abstract', ''))}"
-        )
     header = f"[Results from {source_label} — indexed locally for future searches]\n\n"
-    return header + "\n\n".join(results)
+    return header + "\n\n".join(
+        _format_paper(
+            p.get("arxiv_id", ""),
+            p.get("title", ""),
+            p.get("authors", ""),
+            p.get("categories", ""),
+            p.get("published", ""),
+            p.get("url", ""),
+            p.get("abstract", ""),
+        )
+        for p in papers
+    )
 
 
 @tool
@@ -81,11 +97,16 @@ def search_saved_papers(query: str) -> str:
 def add_paper_to_saved(title: str) -> str:
     """Save a paper from the recent papers collection by title."""
     docs = hybrid_search(papers_store, title, k=1)
-    if docs:
-        saved_store.add_documents(docs)
-        invalidate_fts_index(saved_store)
-        return f"Added '{docs[0].metadata.get('title')}' to saved papers."
-    return "Paper not found in current papers."
+    if not docs:
+        return "Paper not found in current papers."
+    url = docs[0].metadata.get("url", "")
+    if url:
+        existing = hybrid_search(saved_store, url, k=1)
+        if existing and existing[0].metadata.get("url") == url:
+            return f"'{docs[0].metadata.get('title')}' is already in saved papers."
+    saved_store.add_documents(docs)
+    invalidate_fts_index(saved_store)
+    return f"Added '{docs[0].metadata.get('title')}' to saved papers."
 
 
 @tool

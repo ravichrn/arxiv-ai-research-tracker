@@ -23,13 +23,19 @@ jobs:
           python-version: "3.13"
 
       - name: Sync dependencies
-        run: uv sync --all-groups
+        run: uv sync --all-groups --frozen
 
       - name: Lint
         run: uv run ruff check .
 
       - name: Run deterministic tests
-        run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest evaluation/test_guardrails.py evaluation/test_feature_helpers.py evaluation/test_api.py -q
+        run: |
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
+            evaluation/test_guardrails.py \
+            evaluation/test_feature_helpers.py \
+            evaluation/test_api.py \
+            evaluation/test_citation_graph.py \
+            -m "not integration" -q
 
       - name: Regression gate — check eval snapshot baselines
         run: |

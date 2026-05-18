@@ -48,8 +48,7 @@ except ValueError:
 _limiter = Limiter(key_func=get_remote_address)
 
 
-@asynccontextmanager
-async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
+def _active_model_config() -> tuple[str, str]:
     backend = os.getenv("AGENT_LLM", "openai")
     model = (
         os.getenv("VLLM_MODEL")
@@ -57,6 +56,12 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         or os.getenv("ANTHROPIC_MODEL")
         or "default"
     )
+    return backend, model
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
+    backend, model = _active_model_config()
     _MODEL_INFO.info({"backend": backend, "model": model})
     _log.info("Starting arXiv AI Research Tracker API", extra={"backend": backend, "model": model})
     yield
@@ -108,13 +113,7 @@ class ChatResponse(BaseModel):
 
 @app.get("/health", summary="Liveness check")
 def health() -> dict[str, str]:
-    backend = os.getenv("AGENT_LLM", "openai")
-    model = (
-        os.getenv("VLLM_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or os.getenv("ANTHROPIC_MODEL")
-        or "default"
-    )
+    backend, model = _active_model_config()
     return {"status": "ok", "backend": backend, "model": model}
 
 
@@ -123,12 +122,10 @@ def models() -> dict[str, str]:
     """Returns the active LLM backend and model name."""
     ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
     summarizer = f"ollama/{ollama_model}" if _check_ollama() else "openai/gpt-4o-mini"
+    backend, agent_model = _active_model_config()
     return {
-        "backend": os.getenv("AGENT_LLM", "openai"),
-        "agent_model": os.getenv("VLLM_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or os.getenv("ANTHROPIC_MODEL")
-        or "default",
+        "backend": backend,
+        "agent_model": agent_model,
         "summarizer_model": summarizer,
         "embedding_model": os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-ada-002"),
     }

@@ -63,6 +63,14 @@ from ingestion.arxiv_fetcher import (
 
 _log = logging.getLogger(__name__)
 
+
+def _parse_days_from_query(query: str, default: int, max_days: int = 90) -> int:
+    for token in query.split():
+        if token.isdigit():
+            return max(1, min(int(token), max_days))
+    return default
+
+
 _MAX_CHAIN_STEPS = 3
 _CHECKPOINTER_WARNED = False
 _DIAGRAM_ABSTRACT_MAX_CHARS = 3000  # prevent token blow-up in diagram_node
@@ -742,13 +750,8 @@ def digest_node(state: SupervisorState) -> dict:
     """
     import os
 
-    days = 7
-    # Allow "last 14 days digest" etc. via rag_query hint
     query = state.get("rag_query") or _last_human_content(state)
-    for token in query.split():
-        if token.isdigit():
-            days = max(1, min(int(token), 90))
-            break
+    days = _parse_days_from_query(query, default=7)
 
     papers = get_recent_papers(days=days)
     if not papers:
@@ -790,12 +793,7 @@ def digest_node(state: SupervisorState) -> dict:
 def trends_node(state: SupervisorState) -> dict:
     """No-LLM trend analysis: rising arXiv categories over recent time windows."""
     query = state.get("rag_query") or _last_human_content(state)
-
-    days = 14
-    for token in query.split():
-        if token.isdigit():
-            days = max(1, min(int(token), 90))
-            break
+    days = _parse_days_from_query(query, default=14)
 
     # Fetch enough papers to cover both windows: [now-2N, now-N) and [now-N, now].
     papers = get_recent_papers(days=days * 2)

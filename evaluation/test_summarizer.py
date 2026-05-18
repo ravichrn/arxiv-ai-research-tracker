@@ -18,6 +18,7 @@ from ingestion.arxiv_fetcher import summarize_text
 _JUDGE = make_judge()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("case", SUMMARIZER_CASES, ids=[c.label for c in SUMMARIZER_CASES])
 def test_summarizer_no_hallucination(case):
     """Summary must not introduce facts absent from the source abstract."""
@@ -32,6 +33,7 @@ def test_summarizer_no_hallucination(case):
     assert_test(test_case, [HallucinationMetric(threshold=0.5, model=_JUDGE)])
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("case", SUMMARIZER_CASES, ids=[c.label for c in SUMMARIZER_CASES])
 def test_summarizer_coverage(case):
     """Summary must cover the key information from the source abstract."""

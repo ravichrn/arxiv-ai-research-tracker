@@ -41,6 +41,7 @@ def _answer(query: str, context_chunks: list[str]) -> str:
     return str(response.content).strip()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("case", RAG_CASES, ids=[c.label for c in RAG_CASES])
 def test_rag_faithfulness(case):
     """Agent answer must be grounded in the retrieved context (no hallucination)."""
@@ -59,6 +60,7 @@ def test_rag_faithfulness(case):
     assert_test(test_case, [FaithfulnessMetric(threshold=0.7, model=_JUDGE)])
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("case", RAG_CASES, ids=[c.label for c in RAG_CASES])
 def test_rag_answer_relevancy(case):
     """Agent answer must be relevant to the user query."""
@@ -77,6 +79,7 @@ def test_rag_answer_relevancy(case):
     assert_test(test_case, [AnswerRelevancyMetric(threshold=0.7, model=_JUDGE)])
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("case", RAG_CASES, ids=[c.label for c in RAG_CASES])
 def test_rag_context_relevancy(case):
     """Retrieved documents must be relevant to the query (retrieval quality).
@@ -101,6 +104,7 @@ def test_rag_context_relevancy(case):
     assert_test(test_case, [ContextualRelevancyMetric(threshold=0.5, model=_JUDGE)])
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "case", ADVERSARIAL_RAG_CASES, ids=[c.label for c in ADVERSARIAL_RAG_CASES]
 )

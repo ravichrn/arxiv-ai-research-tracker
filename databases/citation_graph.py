@@ -22,6 +22,11 @@ _DB_DIR = Path(__file__).parent
 DEFAULT_DB_PATH = _DB_DIR / "citation_graph.db"
 
 
+def _base_id(arxiv_id: str) -> str:
+    """Strip version suffix: '2301.12345v2' → '2301.12345'."""
+    return arxiv_id.split("v", 1)[0]
+
+
 def _connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -33,8 +38,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
     """Ensure the citation_edges table exists."""
     conn = _connect(db_path)
     try:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS citation_edges (
                 source_arxiv_id  TEXT NOT NULL,
                 cited_arxiv_id   TEXT NOT NULL,
@@ -43,8 +47,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
                 fetched_at       TEXT NOT NULL,
                 PRIMARY KEY (source_arxiv_id, cited_arxiv_id, direction)
             )
-            """
-        )
+            """)
         conn.commit()
     finally:
         conn.close()
@@ -63,6 +66,7 @@ def upsert_edges(
         edges: List of {"cited_arxiv_id": str, "title": str | None} dicts.
         direction: "references" or "citations".
     """
+    source_id = _base_id(source_id)
     if not edges:
         return
     now = datetime.now(UTC).isoformat()
@@ -98,6 +102,7 @@ def get_edges(
     Returns list of {"cited_arxiv_id": str, "title": str | None} dicts,
     ordered by insertion order (ROWID), up to `limit` results.
     """
+    arxiv_id = _base_id(arxiv_id)
     init_db(db_path)
     conn = _connect(db_path)
     try:
@@ -118,6 +123,7 @@ def get_edges(
 
 def has_edges(arxiv_id: str, db_path: Path = DEFAULT_DB_PATH) -> bool:
     """Return True if edges have already been fetched for this paper."""
+    arxiv_id = _base_id(arxiv_id)
     init_db(db_path)
     conn = _connect(db_path)
     try:
