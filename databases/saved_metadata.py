@@ -40,15 +40,13 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
     """Ensure the saved metadata tables exist."""
     conn = _connect(db_path)
     try:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_metadata (
                 title_key TEXT PRIMARY KEY,
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 note TEXT
             )
-            """
-        )
+            """)
         conn.commit()
     finally:
         conn.close()

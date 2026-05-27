@@ -15,7 +15,12 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from deepeval.metrics import AnswerRelevancyMetric, FaithfulnessMetric, HallucinationMetric
+from deepeval.metrics import (
+    AnswerRelevancyMetric,
+    ContextualPrecisionMetric,
+    FaithfulnessMetric,
+    HallucinationMetric,
+)
 from deepeval.test_case import LLMTestCase
 
 from databases.stores import hybrid_search, papers_store
@@ -128,11 +133,16 @@ def run_rag_eval() -> dict | None:
         print("  DB is empty — run main.py first.")
         return None
 
-    faithfulness = FaithfulnessMetric(threshold=0.7, model=_JUDGE, async_mode=False)
-    relevancy = AnswerRelevancyMetric(threshold=0.7, model=_JUDGE, async_mode=False)
+    # ContextualPrecisionMetric tests retrieval RANKING — whether nodes relevant to the
+    # expected answer rank above irrelevant ones. This is the right question for
+    # single-target queries ("did we surface the right paper, and rank it high?"),
+    # unlike ContextualRelevancyMetric whose ceiling is ~1/k when only one paper matches.
+    # expected_output is built from the curated expected_keywords (no fabricated answers).
+    contextual_precision = ContextualPrecisionMetric(threshold=0.5, model=_JUDGE, async_mode=False)
+    answer_relevancy = AnswerRelevancyMetric(threshold=0.7, model=_JUDGE, async_mode=False)
 
-    faithfulness_scores: list[float] = []
-    relevancy_scores: list[float] = []
+    precision_scores: list[float] = []
+    answer_scores: list[float] = []
     skipped = 0
 
     total = len(RAG_CASES)
@@ -145,32 +155,40 @@ def run_rag_eval() -> dict | None:
 
         context = [f"Title: {d.metadata.get('title')}\n{d.page_content}" for d in retrieved]
         answer = _answer(case.query, context)
+        expected_output = "A relevant answer discusses: " + ", ".join(case.expected_keywords)
 
-        tc = LLMTestCase(input=case.query, actual_output=answer, retrieval_context=context)
+        tc = LLMTestCase(
+            input=case.query,
+            actual_output=answer,
+            expected_output=expected_output,
+            retrieval_context=context,
+        )
 
-        f_score, _ = _score(faithfulness, tc)
-        r_score, _ = _score(relevancy, tc)
-        if f_score is not None:
-            faithfulness_scores.append(f_score)
-        if r_score is not None:
-            relevancy_scores.append(r_score)
+        cp_score, _ = _score(contextual_precision, tc)
+        ar_score, _ = _score(answer_relevancy, tc)
+        if cp_score is not None:
+            precision_scores.append(cp_score)
+        if ar_score is not None:
+            answer_scores.append(ar_score)
 
-        f_str = f"{f_score:.2f}" if f_score is not None else "ERR"
-        r_str = f"{r_score:.2f}" if r_score is not None else "ERR"
-        print(f"  [{i}/{total}] faithfulness={f_str}  relevancy={r_str}", flush=True)
+        cp_str = f"{cp_score:.2f}" if cp_score is not None else "ERR"
+        ar_str = f"{ar_score:.2f}" if ar_score is not None else "ERR"
+        print(
+            f"  [{i}/{total}] contextual_precision={cp_str}  answer_relevancy={ar_str}", flush=True
+        )
 
-    f_stats = _stats(faithfulness_scores)
-    r_stats = _stats(relevancy_scores)
+    cp_stats = _stats(precision_scores)
+    ar_stats = _stats(answer_scores)
     return {
-        "faithfulness_mean": f_stats["mean"],
-        "faithfulness_std": f_stats["std"],
-        "faithfulness_min": f_stats["min"],
-        "faithfulness_max": f_stats["max"],
-        "relevancy_mean": r_stats["mean"],
-        "relevancy_std": r_stats["std"],
-        "relevancy_min": r_stats["min"],
-        "relevancy_max": r_stats["max"],
-        "n_scored": len(faithfulness_scores),
+        "contextual_precision_mean": cp_stats["mean"],
+        "contextual_precision_std": cp_stats["std"],
+        "contextual_precision_min": cp_stats["min"],
+        "contextual_precision_max": cp_stats["max"],
+        "answer_relevancy_mean": ar_stats["mean"],
+        "answer_relevancy_std": ar_stats["std"],
+        "answer_relevancy_min": ar_stats["min"],
+        "answer_relevancy_max": ar_stats["max"],
+        "n_scored": len(precision_scores),
         "n_skipped": skipped,
     }
 
@@ -328,15 +346,19 @@ def _print_eval_summary(
         lines.append(f"Summarizer hallucination (mean, lower=better): {hm:.3f}  (n={n})")
     if rag:
         payload["suites"]["rag"] = rag
-        if rag["faithfulness_mean"] is not None:
+        if rag["contextual_precision_mean"] is not None:
+            prec = rag
             lines.append(
-                f"RAG faithfulness:  mean={rag['faithfulness_mean']:.3f}  std={rag['faithfulness_std']:.3f}"  # noqa: E501
-                f"  min={rag['faithfulness_min']:.2f}  max={rag['faithfulness_max']:.2f}"
-                f"  (n={rag['n_scored']}, skipped={rag['n_skipped']})"
+                f"RAG contextual precision:"
+                f"  mean={prec['contextual_precision_mean']:.3f}"
+                f"  std={prec['contextual_precision_std']:.3f}"
+                f"  min={prec['contextual_precision_min']:.2f}"
+                f"  max={prec['contextual_precision_max']:.2f}"
+                f"  (n={prec['n_scored']}, skipped={prec['n_skipped']})"
             )
             lines.append(
-                f"RAG relevancy:     mean={rag['relevancy_mean']:.3f}  std={rag['relevancy_std']:.3f}"  # noqa: E501
-                f"  min={rag['relevancy_min']:.2f}  max={rag['relevancy_max']:.2f}"
+                f"RAG answer relevancy:      mean={rag['answer_relevancy_mean']:.3f}  std={rag['answer_relevancy_std']:.3f}"  # noqa: E501
+                f"  min={rag['answer_relevancy_min']:.2f}  max={rag['answer_relevancy_max']:.2f}"
             )
         else:
             lines.append("RAG: no scored cases (DB empty or all skipped).")
@@ -415,6 +437,7 @@ def main():
         # Merge: top-level metadata from current run, suites merged per-key
         merged = {**existing, **{k: v for k, v in summary.items() if k != "suites"}}
         merged["suites"] = {**existing.get("suites", {}), **summary["suites"]}
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
         print(f"\nUpdated metrics JSON at {out}", flush=True)
 

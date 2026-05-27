@@ -40,7 +40,9 @@ dependencies = [
     { name = "sentence-transformers" },
     { name = "slowapi" },
     { name = "tenacity" },
+    { name = "torch" },
     { name = "tqdm" },
+    { name = "transformers" },
     { name = "typing-extensions" },
     { name = "uvicorn" },
 ]
@@ -84,7 +86,9 @@ requires-dist = [
     { name = "sentence-transformers" },
     { name = "slowapi", specifier = ">=0.1.9" },
     { name = "tenacity" },
+    { name = "torch", specifier = ">=2.11.0" },
     { name = "tqdm" },
+    { name = "transformers", specifier = ">=4.40" },
     { name = "typing-extensions" },
     { name = "uvicorn" },
 ]

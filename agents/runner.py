@@ -18,6 +18,8 @@ Self-RAG nodes:
                            context; routes to rewrite or END accordingly.
 """
 
+import logging
+import re
 from typing import Annotated
 
 from langchain_core.messages import (
@@ -38,6 +40,9 @@ from agents.tools import (
     search_saved_papers,
 )
 from databases.stores import llm_agent
+from guardrails.output_validator import OutputRejected, validate_output
+
+_log = logging.getLogger(__name__)
 
 _MAX_REWRITES = 2
 
@@ -94,6 +99,7 @@ class AgentState(TypedDict):
     retrieval_context: list[str]  # filtered doc texts from grade_docs_node
     rewrite_count: int  # guards against infinite rewrite loops
     hallucination_verdict: str  # "YES" | "NO" | "" — set by hallucination_check_node
+    known_arxiv_ids: set[str]  # IDs from retrieved docs, passed to output validator
 
 
 # ---------------------------------------------------------------------------
@@ -164,16 +170,23 @@ def grade_docs_node(state: AgentState) -> dict:
     # Each doc block is separated by a blank line in _format_docs output.
     doc_blocks = [b.strip() for b in tool_content.split("\n\n") if b.strip()]
 
+    _ARXIV_ID_RE = re.compile(r"\b(\d{4}\.\d{4,5}(?:v\d+)?)\b")
+    known_ids: set[str] = set()
     passing: list[str] = []
     for doc in doc_blocks:
         prompt = _DOC_GRADE_PROMPT.format(question=question, doc=doc[:800])
         verdict = str(llm_agent.invoke(prompt).content).strip().upper()
         if verdict.startswith("YES"):
             passing.append(doc)
+        # Collect all arxiv IDs from retrieved docs (passing and failing) for
+        # the output validator — IDs from retrieved context are legitimate.
+        for match in _ARXIV_ID_RE.finditer(doc):
+            known_ids.add(match.group(1).split("v")[0])
 
     return {
         "retrieval_context": passing,
         "rewrite_count": state.get("rewrite_count", 0),
+        "known_arxiv_ids": known_ids,
     }
 
 
@@ -213,6 +226,19 @@ def hallucination_check_node(state: AgentState) -> dict:
                 f"\n\n{_DISCLAIMER_PREFIX} This answer could not be fully verified against "
                 "the retrieved papers. Please treat with caution."
             )
+            return {
+                "hallucination_verdict": verdict,
+                "messages": [AIMessage(content=answer + disclaimer)],
+            }
+
+    # Output validation: citation integrity + toxicity check on accepted answers.
+    if verdict == "YES":
+        known_ids = state.get("known_arxiv_ids", set())
+        try:
+            validate_output(answer, metadata={"known_arxiv_ids": known_ids})
+        except OutputRejected as exc:
+            _log.warning("Output validation failed: %s", exc)
+            disclaimer = f"\n\n{_DISCLAIMER_PREFIX} {exc}"
             return {
                 "hallucination_verdict": verdict,
                 "messages": [AIMessage(content=answer + disclaimer)],

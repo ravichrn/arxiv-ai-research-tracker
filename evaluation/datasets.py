@@ -116,71 +116,138 @@ ADVERSARIAL_RAG_CASES: list[RAGCase] = [
         expected_keywords=["language model", "training", "transformer"],
         category="cs.RO",  # intentionally wrong category — robotics DB, not NLP
     ),
+    RAGCase(
+        label="adv_clinical_medicine",
+        query="What are the latest FDA-approved drugs for treating Alzheimer's disease?",
+        expected_keywords=["drug", "clinical", "FDA", "Alzheimer", "treatment"],
+        category="cs.AI",  # AI papers — no clinical medicine content expected
+    ),
+    RAGCase(
+        label="adv_economics",
+        query="How does monetary policy affect inflation and interest rates?",
+        expected_keywords=["inflation", "interest rate", "monetary", "central bank", "policy"],
+        category="cs.LG",  # ML papers — no economics content expected
+    ),
+    RAGCase(
+        label="adv_hardware_architecture",
+        query="What are the trade-offs between RISC-V and ARM processor architectures?",
+        expected_keywords=["RISC-V", "ARM", "processor", "ISA", "microarchitecture"],
+        category="cs.CL",  # NLP papers — no hardware architecture content expected
+    ),
 ]
 
 RAG_CASES: list[RAGCase] = [
-    # cs.CL — NLP / language models
+    # Queries are paper-specific — answers require retrieved content, not parametric knowledge.
+    # Category filters removed: metadata in this DB does not include a category field.
     RAGCase(
-        label="llm_scaling",
-        query="What are the latest papers on large language models and scaling?",
-        expected_keywords=["language model", "LLM", "transformer", "GPT", "scaling", "training"],
-        category="cs.CL",
+        label="bert_as_judge",
+        query="What does BERT-as-a-Judge propose as an alternative to lexical methods for LLM evaluation, and what are its claimed advantages?",
+        expected_keywords=["BERT", "lexical", "evaluation", "reference-based", "efficient"],
     ),
     RAGCase(
-        label="instruction_tuning",
-        query="What methods are used for instruction tuning and alignment of language models?",
-        expected_keywords=["instruction", "alignment", "fine-tuning", "RLHF", "human feedback"],
-        category="cs.CL",
+        label="recallm_lost_in_thought",
+        query="What is the lost-in-thought phenomenon that RecaLLM addresses, and how does its in-context retrieval approach work?",
+        expected_keywords=[
+            "RecaLLM",
+            "lost-in-thought",
+            "in-context retrieval",
+            "reasoning",
+            "long-context",
+        ],
     ),
     RAGCase(
-        label="rag_retrieval",
-        query="How do retrieval-augmented generation systems work for question answering?",
-        expected_keywords=["retrieval", "augmented", "generation", "RAG", "question answering"],
-        category="cs.CL",
-    ),
-    # cs.LG — Machine learning
-    RAGCase(
-        label="diffusion_models",
-        query="What are recent advances in diffusion models for generative tasks?",
-        expected_keywords=["diffusion", "generative", "score matching", "denoising", "image"],
-        category="cs.LG",
+        label="llm_harmful_mechanism",
+        query="What unified mechanism do the retrieved papers identify for how LLMs generate harmful content despite alignment training?",
+        expected_keywords=["harmful", "alignment", "mechanism", "jailbreak", "safeguard"],
     ),
     RAGCase(
-        label="rl_policy_optimization",
-        query="What papers focus on reinforcement learning algorithms, reward modeling, or policy optimization?",
-        expected_keywords=["reward", "policy", "agent", "environment", "reinforcement"],
-        category="cs.LG",
+        label="visionFoundry_approach",
+        query="What training approach does VisionFoundry use to improve VLM visual perception, and what problem does it solve?",
+        expected_keywords=["VisionFoundry", "synthetic", "visual perception", "VLM", "spatial"],
     ),
     RAGCase(
-        label="graph_neural_networks",
-        query="What recent work exists on graph neural networks and their applications?",
-        expected_keywords=["graph", "neural network", "node", "edge", "GNN"],
-        category="cs.LG",
-    ),
-    # cs.AI — AI systems
-    RAGCase(
-        label="multimodal_learning",
-        query="What papers cover multimodal learning combining vision and language?",
-        expected_keywords=["multimodal", "vision", "language", "image", "contrastive"],
-        category="cs.AI",
+        label="visor_agentic_rag",
+        query="What does VISOR stand for and how does it handle complex multi-step visual queries differently from standard RAG?",
+        expected_keywords=["VISOR", "iterative", "visual", "agentic", "over-horizon"],
     ),
     RAGCase(
-        label="reasoning_planning",
-        query="What work exists on reasoning and planning in AI agents?",
-        expected_keywords=["reasoning", "planning", "agent", "chain-of-thought", "inference"],
-        category="cs.AI",
-    ),
-    # cs.RO — Robotics
-    RAGCase(
-        label="robotics_manipulation",
-        query="What recent work exists on robot learning and manipulation?",
-        expected_keywords=["robot", "manipulation", "reinforcement learning", "policy", "control"],
-        category="cs.RO",
+        label="xfed_federated_attack",
+        query="What makes XFED's model poisoning attack against federated learning non-collusive, and why is that significant?",
+        expected_keywords=["XFED", "non-collusive", "federated", "poisoning", "Byzantine"],
     ),
     RAGCase(
-        label="robot_perception",
-        query="How do robots perceive and understand their environment for navigation?",
-        expected_keywords=["robot", "perception", "navigation", "sensor", "mapping"],
-        category="cs.RO",
+        label="safemind_quadruped",
+        query="What safety framework does SafeMind propose for quadruped locomotion and what guarantees does it provide?",
+        expected_keywords=["SafeMind", "quadruped", "safety", "differentiable", "uncertainty"],
+    ),
+    RAGCase(
+        label="echo_chest_xray",
+        query="What diffusion approach does ECHO use for chest X-ray report generation and what efficiency problem does it solve?",
+        expected_keywords=["ECHO", "chest X-ray", "diffusion", "one-step", "autoregressive"],
+    ),
+    RAGCase(
+        label="many_tier_instruction",
+        query="What instruction hierarchy does the retrieved paper describe for LLM agents and why does trust level matter?",
+        expected_keywords=[
+            "instruction hierarchy",
+            "trust",
+            "authority",
+            "system message",
+            "LLM agent",
+        ],
+    ),
+    RAGCase(
+        label="process_reward_agents",
+        query="How do process reward agents steer knowledge-intensive reasoning differently from outcome-based reward approaches?",
+        expected_keywords=[
+            "process reward",
+            "knowledge-intensive",
+            "intermediate",
+            "verifiable",
+            "reasoning",
+        ],
+    ),
+    RAGCase(
+        label="case_grounded_evidence",
+        query="What is the case-grounded evidence verification framework and how does it construct evidence-sensitive supervision?",
+        expected_keywords=["evidence", "grounded", "supervision", "verification", "claim"],
+    ),
+    RAGCase(
+        label="vl_calibration",
+        query="What decoupled calibration approach does VL-Calibration use to reduce hallucinations in vision-language models?",
+        expected_keywords=[
+            "VL-Calibration",
+            "calibration",
+            "hallucination",
+            "confidence",
+            "vision-language",
+        ],
+    ),
+    RAGCase(
+        label="safeadapt_rl",
+        query="What safety guarantee does SafeAdapt provide for policy updates in reinforcement learning under non-stationary environments?",
+        expected_keywords=[
+            "SafeAdapt",
+            "safe",
+            "policy update",
+            "non-stationary",
+            "reinforcement learning",
+        ],
+    ),
+    RAGCase(
+        label="e3_tir_tool_reasoning",
+        query="What limitations in tool-integrated reasoning does E3-TIR address and how does it exploit experience differently?",
+        expected_keywords=["E3-TIR", "tool-integrated", "reasoning", "experience", "Zero-RL"],
+    ),
+    RAGCase(
+        label="semantic_rate_distortion",
+        query="What is the semantic rate-distortion framework for multi-agent communication described in the retrieved papers?",
+        expected_keywords=[
+            "semantic",
+            "rate-distortion",
+            "multi-agent",
+            "communication",
+            "alignment",
+        ],
     ),
 ]

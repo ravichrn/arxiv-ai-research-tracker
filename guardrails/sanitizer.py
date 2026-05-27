@@ -5,13 +5,21 @@ Two surfaces are protected:
   1. Retrieved content (paper titles, authors, summaries) — via sanitize_retrieved()
   2. User input queries — via validate_user_input()
 
-The current approach is pattern-based (fast, no extra API calls). It catches
-the most common injection vectors: role overrides, instruction hijacks, system
-prompt leaks, jailbreak triggers, and delimiter smuggling.
+Input validation strategy (layered):
+  - Primary: Prompt-Guard-86M classifier (Meta) — catches semantic paraphrases,
+    unicode obfuscation, and indirect injection that regex misses.
+  - Fallback: regex pattern registry — used when the model is unavailable
+    (no HF access, CPU-only with tight latency budget).
+  - Always applied: length cap and NFC unicode normalization.
+
+Retrieved content sanitization still uses regex only — Prompt-Guard is
+designed for user query classification, not arbitrary document text.
 """
 
 import re
 import unicodedata
+
+from guardrails import prompt_guard as _prompt_guard
 
 # ---------------------------------------------------------------------------
 # Injection pattern registry
@@ -106,6 +114,10 @@ def validate_user_input(query: str) -> str:
 
     Raises InputRejected if the query looks like a prompt injection attempt.
     Returns the (possibly truncated + normalized) query otherwise.
+
+    Detection strategy:
+      1. Prompt-Guard-86M classifier (primary) — catches semantic paraphrases.
+      2. Regex pattern registry (fallback) — used if model is unavailable.
     """
     if not query or not query.strip():
         raise InputRejected("Query must not be empty.")
@@ -115,6 +127,18 @@ def validate_user_input(query: str) -> str:
 
     normalized = _normalize(query)
 
+    # Primary: Prompt-Guard-86M model-based classifier.
+    score = _prompt_guard.classify_injection(normalized)
+    if score is not None:
+        if score >= _prompt_guard.INJECTION_THRESHOLD:
+            raise InputRejected(
+                f"Query flagged as likely injection by Prompt-Guard "
+                f"(score={score:.2f}, threshold={_prompt_guard.INJECTION_THRESHOLD})."
+            )
+        # Model ran successfully — skip regex to avoid false positives.
+        return normalized
+
+    # Fallback: regex heuristic when model is unavailable.
     if _COMBINED.search(normalized):
         raise InputRejected("Query contains a disallowed pattern and was rejected.")
 

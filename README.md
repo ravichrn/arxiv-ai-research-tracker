@@ -50,7 +50,21 @@ Prometheus metrics at `/metrics` · Grafana dashboard (auto-provisioned) · stru
 
 ### Security
 
-All user input passes through `guardrails/sanitizer.py`: prompt-injection patterns, jailbreak triggers, role overrides, and exfiltration-style content (20+ rules, Unicode normalization). Queries over 500 characters are rejected; the API returns HTTP 400 for invalid input.
+Three-layer guardrail stack protecting both the input and output surfaces:
+
+**Input (user queries)**
+- **Prompt-Guard-86M** (primary) — Meta's DeBERTa-based classifier trained on injection/jailbreak examples. Catches semantic paraphrases and obfuscated variants that regex misses. Returns a probability score; queries above 0.85 are rejected. Configurable via `PROMPT_GUARD_THRESHOLD` env var.
+- **Regex fallback** — 20+ pattern rules (role overrides, jailbreak keywords, delimiter smuggling, exfiltration phrases) used when the model is unavailable. Unicode NFC-normalized before matching.
+- Length cap: queries over 500 characters are rejected with HTTP 400.
+
+**Retrieved content (titles, abstracts injected into prompts)**
+- Regex sanitizer replaces matched injection patterns with `[blocked]` before the text reaches the LLM. Field length capped at 2000 chars.
+
+**Output (LLM responses)**
+- **`ArxivCitationValidator`** — extracts any arxiv IDs cited in the response and checks them against the set of IDs from retrieved documents. IDs not found in the retrieval context are flagged as likely hallucinated; a disclaimer is appended.
+- **`ToxicLanguageValidator`** — `unitary/toxic-bert` (110M params) scores the response; flagged responses above threshold 0.80 are rejected. Falls back to pass-through if the model is unavailable.
+
+All validators follow a `PassResult` / `FailResult` contract (mirroring the Guardrails AI validator interface) and are tested offline via monkeypatched fixtures — no GPU or API key needed to run the test suite.
 
 ---
 
@@ -58,16 +72,24 @@ All user input passes through `guardrails/sanitizer.py`: prompt-injection patter
 
 Scored with [DeepEval](https://github.com/confident-ai/deepeval). Answer model: `gpt-5.4`. Judge: `claude-haiku-4-5` (cross-provider — avoids same-model inflation). Raw scores: [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json).
 
-| Suite | Faithfulness | Answer relevancy | n |
-| --- | ---: | ---: | ---: |
-| RAG | **0.992** ± 0.024 | **0.870** ± 0.241 | 10 |
-| Adversarial RAG | **0.952** ± 0.082 | **0.292** ± 0.505 | 3 |
+Eval DB: ~185 indexed papers. RAG cases use 15 paper-specific queries targeting named papers (BERT-as-a-Judge, RecaLLM, VisionFoundry, VISOR, etc.) — each query has exactly one target paper, so the eval measures whether retrieval surfaces and ranks the right one.
 
-Adversarial relevancy is intentionally low — the model stays grounded and refuses off-topic queries rather than fabricate.
+| Suite | Metric | Score | n | Notes |
+| --- | --- | ---: | ---: | --- |
+| RAG | Contextual precision | **1.000** ± 0.000 | 12 | target paper ranks above off-topic chunks every time; 3/15 unscored (judge returned invalid JSON, not a retrieval miss) |
+| RAG | Answer relevancy | **0.985** ± 0.057 | 12 | grounded answer quality; min 0.78 |
+| Adversarial RAG | Faithfulness | **0.972** ± 0.068 | 6 | stays grounded to off-topic context |
+| Adversarial RAG | Answer relevancy | **0.308** ± 0.396 | 6 | low expected — correct grounded refusal when docs are off-topic |
+| No-context baseline | Answer relevancy | 0.995 ± 0.012 | 5 | gpt-5.4 from parametric knowledge; retrieval value strongest on niche/recent papers |
+
+**Retrieval fix (before → after).** The BM25/FTS index is built on the chunk text only, and originally only the abstract was embedded — so paper *titles* were unsearchable. A query like *"What does BERT-as-a-Judge propose"* couldn't match the paper by title and `ContextualRelevancyMetric` scored **0.11** (the right paper rarely ranked into the top-k). Prepending the title to each indexed chunk (so both the dense embedding and BM25 see it) lifted retrieval to **1.00 contextual precision** — the target paper now ranks first. Contextual *precision* (does the relevant node rank above irrelevant ones?) is the correct metric for single-target queries; contextual *relevancy* has a ~1/k ceiling when only one of k retrieved papers matches.
+
+The 3 skipped RAG cases are judge-side failures (`claude-haiku` occasionally returns invalid JSON for the precision metric), not retrieval failures — they are skipped rather than scored as 0.
 
 ```bash
+uv run python -m evaluation.run_eval --suite all --samples 5 --write-metrics evaluation/eval_metrics_snapshot.json
 uv run python -m evaluation.run_eval --suite rag
-uv run python -m evaluation.run_eval --suite adversarial --write-metrics evaluation/eval_metrics_snapshot.json
+uv run python -m evaluation.run_eval --suite adversarial
 uv run pytest evaluation/   # deterministic tests, no API key needed
 ```
 
@@ -84,7 +106,7 @@ arxiv-ai-research-tracker/
 ├── agents/          # LangGraph supervisor + Self-RAG runner + tools
 ├── ingestion/       # arXiv fetching, incremental sync, Semantic Scholar enrichment
 ├── databases/       # LanceDB stores, hybrid search, caching, export utils
-├── guardrails/      # Prompt injection sanitizer
+├── guardrails/      # Input sanitizer + Prompt-Guard-86M classifier + output validators
 ├── evaluation/      # DeepEval metrics, test datasets, pytest suites, snapshot
 ├── grafana/         # Pre-built dashboard + Prometheus scrape config
 └── pyproject.toml

@@ -677,9 +677,13 @@ def _embed_and_store(papers: list[dict]) -> int:
     for paper in papers:
         chunks = _splitter.split_text(paper["abstract"])
         for i, chunk_text in enumerate(chunks):
+            # Prepend the title so both the dense embedding and the BM25 index see it.
+            # The FTS index is built on this text column only, so a title-bearing query
+            # ("What does BERT-as-a-Judge propose") otherwise can't match the paper.
+            indexed_text = f"{paper['title']}\n\n{chunk_text}"
             docs.append(
                 Document(
-                    page_content=chunk_text,
+                    page_content=indexed_text,
                     metadata={
                         "arxiv_id": paper.get("arxiv_id", ""),
                         "title": paper["title"],

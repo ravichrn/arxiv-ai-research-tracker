@@ -383,19 +383,20 @@ def hybrid_search(
         merged_rows = _rrf_merge(vec_rows, fts_rows) if fts_rows else vec_rows
         chunks = [_row_to_doc(row) for row in merged_rows]
 
-        # Deduplicate: keep the first (highest-ranked) chunk per paper URL.
+        # Deduplicate to one chunk per paper across the full oversampled pool,
+        # then rerank before trimming to k. Previously dedup trimmed to k first,
+        # meaning the cross-encoder only saw k survivors and oversampling bought nothing.
         seen: dict[str, object] = {}
         for chunk in chunks:
             parent = chunk.metadata.get("url", chunk.metadata.get("chunk_id", ""))
             if parent not in seen:
                 seen[parent] = chunk
-            if len(seen) >= k:
-                break
 
-        result = list(seen.values())
-        did_rerank = rerank and result
+        candidates = list(seen.values())
+        did_rerank = rerank and candidates
         if did_rerank:
-            result = _rerank(query, result)
+            candidates = _rerank(query, candidates)
+        result = candidates[:k]
 
     _search_results.labels(store=store_label, reranked=str(did_rerank)).observe(len(result))
     return result
