@@ -96,25 +96,21 @@ SUMMARIZER_CASES: list[SummarizerCase] = [
 ]
 
 ADVERSARIAL_RAG_CASES: list[RAGCase] = [
-    # Query is on-topic but retrieved docs are about a *different* sub-field —
-    # the LLM should stay grounded and not hallucinate from prior knowledge.
+    # -----------------------------------------------------------------------
+    # Axis 1: Completely non-CS domains — clear domain mismatch.
+    # The LLM has strong parametric knowledge here but must stay grounded.
+    # -----------------------------------------------------------------------
     RAGCase(
         label="adv_quantum_computing",
         query="What are recent breakthroughs in quantum computing algorithms?",
         expected_keywords=["quantum", "qubit", "algorithm"],
-        category="cs.AI",  # scopes to AI papers — no quantum computing content expected
+        category="cs.AI",  # AI papers — no quantum computing content expected
     ),
     RAGCase(
         label="adv_biology_genomics",
         query="How are transformer models applied to protein folding and genomics?",
         expected_keywords=["protein", "genome", "AlphaFold"],
-        category="cs.RO",  # scopes to robotics papers — no bioinformatics content expected
-    ),
-    RAGCase(
-        label="adv_wrong_category",
-        query="Explain the latest advances in large language model training.",
-        expected_keywords=["language model", "training", "transformer"],
-        category="cs.RO",  # intentionally wrong category — robotics DB, not NLP
+        category="cs.RO",  # robotics papers — no bioinformatics content expected
     ),
     RAGCase(
         label="adv_clinical_medicine",
@@ -129,10 +125,159 @@ ADVERSARIAL_RAG_CASES: list[RAGCase] = [
         category="cs.LG",  # ML papers — no economics content expected
     ),
     RAGCase(
+        label="adv_climate_science",
+        query="What are the primary drivers of Arctic ice sheet melting and how are they measured?",
+        expected_keywords=["Arctic", "ice sheet", "glacier", "melting", "permafrost"],
+        category="cs.CL",  # NLP papers — no climate science content expected
+    ),
+    RAGCase(
+        label="adv_organic_chemistry",
+        query="What catalysts are used in asymmetric synthesis of chiral pharmaceutical compounds?",
+        expected_keywords=["catalyst", "chiral", "synthesis", "enantiomer", "pharmaceutical"],
+        category="cs.RO",  # robotics papers — no organic chemistry content expected
+    ),
+    RAGCase(
+        label="adv_cosmology",
+        query="What is the current evidence for dark matter from galaxy rotation curves?",
+        expected_keywords=["dark matter", "galaxy", "rotation curve", "WIMP", "cosmology"],
+        category="cs.LG",  # ML papers — no astrophysics content expected
+    ),
+    RAGCase(
+        label="adv_public_health",
+        query="How did mRNA vaccine technology achieve high efficacy against COVID-19 variants?",
+        expected_keywords=["mRNA", "vaccine", "efficacy", "COVID", "immunogenicity"],
+        category="cs.AI",  # AI papers — no virology content expected
+    ),
+    RAGCase(
+        label="adv_constitutional_law",
+        query="What is the precedent established by Marbury v. Madison for judicial review?",
+        expected_keywords=[
+            "judicial review",
+            "Supreme Court",
+            "constitution",
+            "precedent",
+            "Marbury",
+        ],
+        category="cs.RO",  # robotics papers — no legal content expected
+    ),
+    RAGCase(
+        label="adv_geotectonics",
+        query="How do subduction zones cause megathrust earthquakes and tsunamis?",
+        expected_keywords=["subduction", "earthquake", "tsunami", "tectonic", "fault"],
+        category="cs.CL",  # NLP papers — no geology content expected
+    ),
+    RAGCase(
+        label="adv_nutrition_science",
+        query="What is the role of gut microbiome diversity in metabolic syndrome and obesity?",
+        expected_keywords=["microbiome", "gut", "metabolic", "obesity", "bacteria"],
+        category="cs.LG",  # ML papers — no nutrition science content expected
+    ),
+    RAGCase(
+        label="adv_music_theory",
+        query="How does serialism differ from atonality in twentieth-century classical composition?",
+        expected_keywords=["serialism", "atonality", "twelve-tone", "Schoenberg", "composition"],
+        category="cs.AI",  # AI papers — no music theory content expected
+    ),
+    RAGCase(
+        label="adv_nuclear_physics",
+        query="What are the engineering challenges in maintaining plasma confinement in a tokamak fusion reactor?",
+        expected_keywords=["tokamak", "plasma", "fusion", "confinement", "magnetic field"],
+        category="cs.CL",  # NLP papers — no nuclear physics content expected
+    ),
+    RAGCase(
+        label="adv_marine_biology",
+        query="How do deep-sea hydrothermal vent ecosystems support chemosynthetic food webs?",
+        expected_keywords=["hydrothermal", "chemosynthesis", "deep-sea", "ecosystem", "vent"],
+        category="cs.RO",  # robotics papers — no marine biology content expected
+    ),
+    RAGCase(
+        label="adv_macroeconomics",
+        query="What mechanisms explain stagflation and how did central banks respond in the 1970s?",
+        expected_keywords=["stagflation", "oil shock", "central bank", "inflation", "unemployment"],
+        category="cs.AI",  # AI papers — no macroeconomics content expected
+    ),
+    RAGCase(
+        label="adv_archaeology",
+        query="What dating methods are used to establish the chronology of Bronze Age settlements?",
+        expected_keywords=["radiocarbon", "stratigraphy", "Bronze Age", "dating", "excavation"],
+        category="cs.LG",  # ML papers — no archaeology content expected
+    ),
+    # -----------------------------------------------------------------------
+    # Axis 2: Within-CS but not AI/ML/NLP/Robotics — harder adversarial cases.
+    # The LLM has very strong parametric knowledge in these CS subfields,
+    # making grounded refusal more difficult.
+    # -----------------------------------------------------------------------
+    RAGCase(
+        label="adv_wrong_category",
+        query="Explain the latest advances in large language model training.",
+        expected_keywords=["language model", "training", "transformer"],
+        category="cs.RO",  # robotics DB — intentionally wrong category for NLP query
+    ),
+    RAGCase(
         label="adv_hardware_architecture",
         query="What are the trade-offs between RISC-V and ARM processor architectures?",
         expected_keywords=["RISC-V", "ARM", "processor", "ISA", "microarchitecture"],
         category="cs.CL",  # NLP papers — no hardware architecture content expected
+    ),
+    RAGCase(
+        label="adv_cryptography",
+        query="How do zero-knowledge proofs enable privacy-preserving authentication without revealing secrets?",
+        expected_keywords=["zero-knowledge", "proof", "cryptography", "authentication", "verifier"],
+        category="cs.RO",  # robotics papers — no cryptography content expected
+    ),
+    RAGCase(
+        label="adv_distributed_systems",
+        query="What guarantees does the Raft consensus algorithm provide compared to Paxos?",
+        expected_keywords=["Raft", "Paxos", "consensus", "distributed", "leader election"],
+        category="cs.AI",  # AI papers — no distributed systems content expected
+    ),
+    RAGCase(
+        label="adv_computer_networking",
+        query="How does TCP congestion control adapt transmission rate using the AIMD algorithm?",
+        expected_keywords=["TCP", "congestion", "AIMD", "bandwidth", "retransmission"],
+        category="cs.LG",  # ML papers — no networking content expected
+    ),
+    RAGCase(
+        label="adv_operating_systems",
+        query="How does copy-on-write memory management reduce overhead in process forking?",
+        expected_keywords=["copy-on-write", "fork", "virtual memory", "page fault", "kernel"],
+        category="cs.CL",  # NLP papers — no OS content expected
+    ),
+    RAGCase(
+        label="adv_computer_graphics",
+        query="How does path tracing approximate global illumination in physically-based rendering?",
+        expected_keywords=[
+            "path tracing",
+            "global illumination",
+            "Monte Carlo",
+            "rendering",
+            "BRDF",
+        ],
+        category="cs.RO",  # robotics papers — no computer graphics content expected
+    ),
+    RAGCase(
+        label="adv_database_systems",
+        query="What is the difference between MVCC and two-phase locking for transaction isolation?",
+        expected_keywords=["MVCC", "two-phase locking", "transaction", "isolation", "concurrency"],
+        category="cs.AI",  # AI papers — no database systems content expected
+    ),
+    RAGCase(
+        label="adv_compilers",
+        query="How does LLVM's intermediate representation enable cross-platform optimization passes?",
+        expected_keywords=["LLVM", "IR", "optimization", "compiler", "backend"],
+        category="cs.LG",  # ML papers — no compiler theory content expected
+    ),
+    RAGCase(
+        label="adv_formal_verification",
+        query="How does the Coq proof assistant use dependent types to verify program correctness?",
+        expected_keywords=[
+            "Coq",
+            "dependent types",
+            "proof assistant",
+            "formal verification",
+            "theorem",
+        ],
+        category="cs.CL",  # NLP papers — no formal methods content expected
     ),
 ]
 

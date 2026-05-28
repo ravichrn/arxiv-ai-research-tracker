@@ -1,6 +1,6 @@
 # ArXiv AI Research Tracker
 
-A research assistant that fetches the latest AI papers from arXiv, indexes them into a searchable vector store, and lets you explore them through a conversational multi-agent interface — from the **terminal** or over **HTTP**.
+A supervisor–worker multi-agent research platform built with LangGraph and FastAPI. A routing supervisor LLM-classifies intent and dispatches to specialized nodes (ingest, summarize, compare, tag, diagram, lineage), invoking a compiled Self-RAG sub-agent — retrieve → grade docs → rewrite query → hallucination check — over a LanceDB vectorstore with hybrid dense+BM25 retrieval (RRF merge) and cross-encoder reranking. Pluggable LLM backends (OpenAI, Claude, Ollama, vLLM), three-layer caching, Prometheus observability, and prompt-injection guardrails. Adversarial DeepEval suite (cross-provider LLM-as-judge) scored faithfulness=0.99 across 26 adversarial probes — model grounds to retrieved context and refuses rather than hallucinating on off-topic queries.
 
 | Layer | Technology |
 |---|---|
@@ -72,14 +72,14 @@ All validators follow a `PassResult` / `FailResult` contract (mirroring the Guar
 
 Scored with [DeepEval](https://github.com/confident-ai/deepeval). Answer model: `gpt-5.4`. Judge: `claude-haiku-4-5` (cross-provider — avoids same-model inflation). Raw scores: [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json).
 
-Eval DB: ~185 indexed papers. RAG cases use 15 paper-specific queries targeting named papers (BERT-as-a-Judge, RecaLLM, VisionFoundry, VISOR, etc.) — each query has exactly one target paper, so the eval measures whether retrieval surfaces and ranks the right one.
+Eval DB: ~185 indexed papers. RAG cases use 15 paper-specific queries targeting named papers (BERT-as-a-Judge, RecaLLM, VisionFoundry, VISOR, etc.) — each query has exactly one target paper, so the eval measures whether retrieval surfaces and ranks the right one. Adversarial cases cover 26 probes across two axes: completely non-CS domains (medicine, law, cosmology, climate science, music theory, archaeology) and within-CS subfields not in the corpus (cryptography, distributed systems, networking, OS, compilers, formal verification) — the latter are harder since the model has strong parametric knowledge there.
 
 | Suite | Metric | Score | n | Notes |
 | --- | --- | ---: | ---: | --- |
 | RAG | Contextual precision | **1.000** ± 0.000 | 12 | target paper ranks above off-topic chunks every time; 3/15 unscored (judge returned invalid JSON, not a retrieval miss) |
 | RAG | Answer relevancy | **0.985** ± 0.057 | 12 | grounded answer quality; min 0.78 |
-| Adversarial RAG | Faithfulness | **0.972** ± 0.068 | 6 | stays grounded to off-topic context |
-| Adversarial RAG | Answer relevancy | **0.308** ± 0.396 | 6 | low expected — correct grounded refusal when docs are off-topic |
+| Adversarial RAG | Faithfulness | **0.988** ± 0.042 | 26 | stays grounded to off-topic context; 26 probes across two axes — non-CS domains (medicine, law, climate, physics) and within-CS subfields the LLM knows well (cryptography, distributed systems, compilers) |
+| Adversarial RAG | Answer relevancy | **0.560** ± 0.406 | 26 | higher than prior run because gpt-5.4 occasionally gives partially useful grounded answers; faithfulness (not relevancy) is the primary signal here |
 | No-context baseline | Answer relevancy | 0.995 ± 0.012 | 5 | gpt-5.4 from parametric knowledge; retrieval value strongest on niche/recent papers |
 
 **Retrieval fix (before → after).** The BM25/FTS index is built on the chunk text only, and originally only the abstract was embedded — so paper *titles* were unsearchable. A query like *"What does BERT-as-a-Judge propose"* couldn't match the paper by title and `ContextualRelevancyMetric` scored **0.11** (the right paper rarely ranked into the top-k). Prepending the title to each indexed chunk (so both the dense embedding and BM25 see it) lifted retrieval to **1.00 contextual precision** — the target paper now ranks first. Contextual *precision* (does the relevant node rank above irrelevant ones?) is the correct metric for single-target queries; contextual *relevancy* has a ~1/k ceiling when only one of k retrieved papers matches.
