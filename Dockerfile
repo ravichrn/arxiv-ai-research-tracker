@@ -17,7 +17,6 @@ COPY agents ./agents
 COPY databases ./databases
 COPY ingestion ./ingestion
 COPY guardrails ./guardrails
-COPY evaluation ./evaluation
 COPY prompts ./prompts
 COPY main.py api.py ./
 

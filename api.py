@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import logging.config
 import os
@@ -48,6 +49,16 @@ except ValueError:
 _limiter = Limiter(key_func=get_remote_address)
 
 
+def _scoped_thread_id(client_ip: str, thread_id: str) -> str:
+    """Namespace thread_id by a short hash of the client IP.
+
+    Prevents one client from reading or corrupting another client's
+    conversation checkpoint by guessing a thread ID.
+    """
+    ip_tag = hashlib.sha256(client_ip.encode()).hexdigest()[:8]
+    return f"{ip_tag}:{thread_id}"
+
+
 def _active_model_config() -> tuple[str, str]:
     backend = os.getenv("AGENT_LLM", "openai")
     model = (
@@ -62,7 +73,8 @@ def _active_model_config() -> tuple[str, str]:
 @asynccontextmanager
 async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     backend, model = _active_model_config()
-    _MODEL_INFO.info({"backend": backend, "model": model})
+    if _MODEL_INFO is not None:
+        _MODEL_INFO.info({"backend": backend, "model": model})
     _log.info("Starting arXiv AI Research Tracker API", extra={"backend": backend, "model": model})
     yield
 
@@ -148,9 +160,11 @@ def chat(request: Request, req: ChatRequest) -> ChatResponse:
         validated_query = validate_user_input(req.query)
     except (InputRejected, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    client_ip = request.client.host if request.client else "unknown"
+    scoped_tid = _scoped_thread_id(client_ip, req.thread_id)
     try:
-        response = run_supervisor_once(validated_query, thread_id=req.thread_id)
-        return ChatResponse(response=response, thread_id=req.thread_id, error=None)
+        response = run_supervisor_once(validated_query, thread_id=scoped_tid)
+        return ChatResponse(response=response, thread_id=scoped_tid, error=None)
     except InputRejected as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
@@ -194,9 +208,12 @@ def chat_stream(request: Request, req: ChatRequest) -> StreamingResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    client_ip = request.client.host if request.client else "unknown"
+    scoped_tid = _scoped_thread_id(client_ip, req.thread_id)
+
     def event_stream() -> Iterator[str]:
         try:
-            for chunk in stream_supervisor_once(validated_query, thread_id=req.thread_id):
+            for chunk in stream_supervisor_once(validated_query, thread_id=scoped_tid):
                 # SSE format: one event chunk per generated token/message piece.
                 safe_chunk = chunk.replace("\r", "")
                 for line in safe_chunk.split("\n"):

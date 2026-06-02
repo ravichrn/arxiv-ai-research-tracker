@@ -49,7 +49,7 @@ from databases.saved_metadata import (
 )
 from databases.stores import hybrid_search, llm_agent, papers_store, saved_store
 from databases.trends_utils import compute_category_trends, render_trends_report
-from guardrails.sanitizer import InputRejected, validate_user_input
+from guardrails.sanitizer import InputRejected, sanitize_retrieved, validate_user_input
 from ingestion.arxiv_fetcher import (
     TOPICS,
     fetch_citation_edges,
@@ -507,9 +507,9 @@ def summarize_node(state: SupervisorState) -> dict:
             prompt = (
                 "You are a research assistant. Summarize the following paper in 5-7 bullet points, "
                 "highlighting the problem it solves, key methods, and main contributions.\n\n"
-                f"Title: {paper['title']}\n"
-                f"Authors: {paper['authors']}\n"
-                f"Abstract: {paper['abstract']}"
+                f"Title: {sanitize_retrieved(paper['title'])}\n"
+                f"Authors: {sanitize_retrieved(paper['authors'])}\n"
+                f"Abstract: {sanitize_retrieved(paper['abstract'])}"
             )
             answer = str(llm_agent.invoke(prompt).content)
             # Prepend S2 TLDR if available
@@ -633,10 +633,10 @@ def compare_node(state: SupervisorState) -> dict:
     papers_section_parts = []
     for i, paper in enumerate(papers, 1):
         papers_section_parts.append(
-            f"**Paper {i}: {paper['title']}**\n"
-            f"Authors: {paper['authors']}\n"
+            f"**Paper {i}: {sanitize_retrieved(paper['title'])}**\n"
+            f"Authors: {sanitize_retrieved(paper['authors'])}\n"
             f"Published: {paper['published'][:10]}\n"
-            f"Abstract: {paper['abstract']}"
+            f"Abstract: {sanitize_retrieved(paper['abstract'])}"
         )
     papers_section = "\n\n---\n\n".join(papers_section_parts)
 
@@ -734,8 +734,8 @@ def tag_node(state: SupervisorState) -> dict:
 
     lines = []
     for i, p in enumerate(papers, 1):
-        cats = p.get("categories", "")
-        lines.append(f"{i}. [{cats}] {p['title']}")
+        cats = sanitize_retrieved(p.get("categories", ""))
+        lines.append(f"{i}. [{cats}] {sanitize_retrieved(p['title'])}")
     papers_list = "\n".join(lines)
 
     prompt = _TAG_PROMPT.format(papers_list=papers_list)
@@ -775,7 +775,7 @@ def digest_node(state: SupervisorState) -> dict:
     for cat, cat_papers in sorted(groups.items()):
         lines = [f"**{cat}** ({len(cat_papers)} paper(s)):"]
         for p in cat_papers[:10]:  # cap per-category to keep prompt manageable
-            lines.append(f"  - {p['title']} ({p.get('published', '')[:10]})")
+            lines.append(f"  - {sanitize_retrieved(p['title'])} ({p.get('published', '')[:10]})")
         section_parts.append("\n".join(lines))
     papers_section = "\n\n".join(section_parts)
 
@@ -893,8 +893,8 @@ def diagram_node(state: SupervisorState) -> dict:
         return {"last_result": result, "messages": [AIMessage(content=result)]}
 
     _log.info("[Supervisor] Generating Mermaid diagram for: %s", paper["title"])
-    abstract = paper["abstract"][:_DIAGRAM_ABSTRACT_MAX_CHARS]
-    prompt = _DIAGRAM_PROMPT.format(title=paper["title"], abstract=abstract)
+    abstract = sanitize_retrieved(paper["abstract"])[:_DIAGRAM_ABSTRACT_MAX_CHARS]
+    prompt = _DIAGRAM_PROMPT.format(title=sanitize_retrieved(paper["title"]), abstract=abstract)
     answer = str(llm_agent.invoke(prompt).content)
     return {"last_result": answer, "messages": [AIMessage(content=answer)]}
 
@@ -955,7 +955,10 @@ def figures_node(state: SupervisorState) -> dict:
         "No figures could be extracted from this paper (HTML unavailable, PDF has no images). "
         "Generating a Mermaid methodology diagram instead:\n\n"
     )
-    prompt = _DIAGRAM_PROMPT.format(title=paper["title"], abstract=paper["abstract"])
+    prompt = _DIAGRAM_PROMPT.format(
+        title=sanitize_retrieved(paper["title"]),
+        abstract=sanitize_retrieved(paper["abstract"])[:_DIAGRAM_ABSTRACT_MAX_CHARS],
+    )
     mermaid = str(llm_agent.invoke(prompt).content)
     answer = fallback_note + mermaid
     return {"last_result": answer, "messages": [AIMessage(content=answer)]}

@@ -68,6 +68,11 @@ class OutputRejected(ValueError):
 _ARXIV_ID_RE = re.compile(r"(?:arxiv\s*:\s*)?(\d{4}\.\d{4,5}(?:v\d+)?)", re.IGNORECASE)
 
 
+def _base_id(arxiv_id: str) -> str:
+    """Strip version suffix: '2312.01234v2' → '2312.01234'."""
+    return arxiv_id.split("v", 1)[0]
+
+
 class ArxivCitationValidator:
     """
     Validates that arxiv IDs cited in a response exist in the local database.
@@ -86,7 +91,7 @@ class ArxivCitationValidator:
         # Normalize: strip version suffix for lookup (2312.01234v2 → 2312.01234)
         hallucinated = []
         for raw_id in mentioned:
-            base_id = raw_id.split("v")[0]
+            base_id = _base_id(raw_id)
             if base_id not in known_ids and raw_id not in known_ids:
                 hallucinated.append(raw_id)
 
@@ -138,10 +143,12 @@ def _load_toxic_pipeline():
 
 class ToxicLanguageValidator:
     """
-    Validates that LLM output doesn't contain toxic language.
+    Best-effort validator: checks LLM output for toxic language.
 
-    Uses unitary/toxic-bert (110M params). Falls back to PassResult if the
-    model is unavailable so the application stays usable without GPU/internet.
+    Uses unitary/toxic-bert (110M params). Falls back to PassResult (allow)
+    if the model cannot load or inference fails — this is intentional to keep
+    the application usable without GPU/internet access. Treat this check as
+    a best-effort signal, not a hard safety guarantee.
     """
 
     def validate(self, value: str, metadata: dict) -> ValidationResult:

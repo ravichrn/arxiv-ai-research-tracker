@@ -100,10 +100,18 @@ def add_paper_to_saved(title: str) -> str:
     if not docs:
         return "Paper not found in current papers."
     url = docs[0].metadata.get("url", "")
-    if url:
-        existing = hybrid_search(saved_store, url, k=1)
-        if existing and existing[0].metadata.get("url") == url:
-            return f"'{docs[0].metadata.get('title')}' is already in saved papers."
+    if url and _SAFE_URL_RE.match(url):
+        tbl = saved_store.get_table()
+        if tbl.count_rows() > 0:
+            try:
+                matches = tbl.search().where(f"url = '{url}'", prefilter=True).limit(1).to_list()
+                if matches:
+                    return f"'{docs[0].metadata.get('title')}' is already in saved papers."
+            except Exception:
+                # Fall back to vector search on LanceDB API incompatibility
+                existing = hybrid_search(saved_store, url, k=1)
+                if existing and existing[0].metadata.get("url") == url:
+                    return f"'{docs[0].metadata.get('title')}' is already in saved papers."
     saved_store.add_documents(docs)
     invalidate_fts_index(saved_store)
     return f"Added '{docs[0].metadata.get('title')}' to saved papers."

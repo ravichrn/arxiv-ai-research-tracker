@@ -12,8 +12,9 @@ fetched for a paper they are cached here indefinitely.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -121,16 +122,31 @@ def get_edges(
         conn.close()
 
 
+def _citation_cache_ttl_days() -> int:
+    return int(os.getenv("CITATION_CACHE_TTL_DAYS", "30") or "30")
+
+
 def has_edges(arxiv_id: str, db_path: Path = DEFAULT_DB_PATH) -> bool:
-    """Return True if edges have already been fetched for this paper."""
+    """Return True if fresh edges exist for this paper.
+
+    Returns False (triggering a re-fetch) when edges are older than
+    CITATION_CACHE_TTL_DAYS (default 30).
+    """
     arxiv_id = _base_id(arxiv_id)
     init_db(db_path)
     conn = _connect(db_path)
     try:
         row = conn.execute(
-            "SELECT 1 FROM citation_edges WHERE source_arxiv_id = ? LIMIT 1",
+            "SELECT fetched_at FROM citation_edges WHERE source_arxiv_id = ? LIMIT 1",
             (arxiv_id,),
         ).fetchone()
-        return row is not None
+        if row is None:
+            return False
+        try:
+            fetched_at = datetime.fromisoformat(row[0])
+            age = datetime.now(UTC) - fetched_at
+            return age < timedelta(days=_citation_cache_ttl_days())
+        except (ValueError, TypeError):
+            return True  # malformed timestamp — treat as still valid
     finally:
         conn.close()

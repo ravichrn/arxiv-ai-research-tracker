@@ -149,6 +149,14 @@ def agent_node(state: AgentState) -> dict:
 _tool_node = ToolNode(_TOOLS)
 
 
+_ARXIV_ID_RE = re.compile(r"\b(\d{4}\.\d{4,5}(?:v\d+)?)\b")
+
+
+def _base_id(arxiv_id: str) -> str:
+    """Strip version suffix: '2312.01234v2' → '2312.01234'."""
+    return arxiv_id.split("v", 1)[0]
+
+
 def grade_docs_node(state: AgentState) -> dict:
     """Grade each retrieved document for relevance; keep only passing ones.
 
@@ -170,7 +178,6 @@ def grade_docs_node(state: AgentState) -> dict:
     # Each doc block is separated by a blank line in _format_docs output.
     doc_blocks = [b.strip() for b in tool_content.split("\n\n") if b.strip()]
 
-    _ARXIV_ID_RE = re.compile(r"\b(\d{4}\.\d{4,5}(?:v\d+)?)\b")
     known_ids: set[str] = set()
     passing: list[str] = []
     for doc in doc_blocks:
@@ -181,7 +188,7 @@ def grade_docs_node(state: AgentState) -> dict:
         # Collect all arxiv IDs from retrieved docs (passing and failing) for
         # the output validator — IDs from retrieved context are legitimate.
         for match in _ARXIV_ID_RE.finditer(doc):
-            known_ids.add(match.group(1).split("v")[0])
+            known_ids.add(_base_id(match.group(1)))
 
     return {
         "retrieval_context": passing,
@@ -231,7 +238,9 @@ def hallucination_check_node(state: AgentState) -> dict:
                 "messages": [AIMessage(content=answer + disclaimer)],
             }
 
-    # Output validation: citation integrity + toxicity check on accepted answers.
+    # Output validation: citation integrity + best-effort toxicity check.
+    # Validation failures append a disclaimer rather than blocking the answer,
+    # so the user still receives a response but is informed of the concern.
     if verdict == "YES":
         known_ids = state.get("known_arxiv_ids", set())
         try:
