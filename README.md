@@ -1,6 +1,6 @@
 # ArXiv AI Research Tracker
 
-A supervisor–worker multi-agent research platform built with LangGraph and FastAPI. A routing supervisor LLM-classifies intent and dispatches to specialized nodes (ingest, summarize, compare, tag, diagram, lineage), invoking a compiled Self-RAG sub-agent — retrieve → grade docs → rewrite query → hallucination check — over a LanceDB vectorstore with hybrid dense+BM25 retrieval (RRF merge) and cross-encoder reranking. Pluggable LLM backends (OpenAI, Claude, Ollama, vLLM), three-layer caching, Prometheus observability, and prompt-injection guardrails. Adversarial DeepEval suite (cross-provider LLM-as-judge) scored faithfulness=0.99 across 26 adversarial probes — model grounds to retrieved context and refuses rather than hallucinating on off-topic queries.
+A multi-agent research assistant built in LangGraph that operates over a corpus of machine learning papers. A supervisor agent routes and chains requests across specialized tasks and delegates retrieval to a Self-RAG sub-agent that grades its own retrieved documents, rewrites queries, and verifies answers against source material before responding. Combines dense and BM25 retrieval with cross-encoder reranking over LanceDB, with pluggable LLM backends, layered caching, observability, and prompt-injection guardrails. Evaluated with an adversarial LLM-as-judge suite that confirmed grounded refusal when context cannot support an answer.
 
 | Layer | Technology |
 |---|---|
