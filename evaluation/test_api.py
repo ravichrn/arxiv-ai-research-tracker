@@ -36,7 +36,9 @@ def _load_api_module(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "guardrails", guardrails_pkg)
     monkeypatch.setitem(sys.modules, "guardrails.sanitizer", sanitizer_mod)
     monkeypatch.delitem(sys.modules, "api", raising=False)
-    return importlib.import_module("api")
+    api = importlib.import_module("api")
+    monkeypatch.setattr(api, "_scoped_thread_id", lambda _ip, tid: tid)
+    return api
 
 
 @pytest.fixture
