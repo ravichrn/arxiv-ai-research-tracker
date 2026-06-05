@@ -394,7 +394,7 @@ def main():
     )
     parser.add_argument(
         "--suite",
-        choices=["all", "rag", "summarizer", "adversarial", "baseline"],
+        choices=["all", "rag", "summarizer", "adversarial", "baseline", "cost"],
         default="all",
         help="Which eval suite to run (default: all)",
     )
@@ -406,6 +406,18 @@ def main():
         help="Write JSON summary (same structure as EVAL_SUMMARY) to PATH",
     )
     args = parser.parse_args()
+
+    if args.suite == "cost":
+        from evaluation.cost_analysis import run_cost_analysis
+
+        cost_results = run_cost_analysis(n_samples=args.samples if args.samples != 3 else 5)
+        out_path = args.write_metrics or "evaluation/cost_vs_quality.json"
+        if cost_results:
+            out = Path(out_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(cost_results, indent=2) + "\n", encoding="utf-8")
+            print(f"\nCost analysis results written to {out}", flush=True)
+        return
 
     summarizer_stats = rag_stats = adversarial_stats = baseline_stats = None
 

@@ -49,6 +49,7 @@ dependencies = [
     "python-json-logger>=2.0",
     "transformers>=4.40",
     "torch>=2.11.0",
+    "accelerate",
 ]
 
 [project.scripts]

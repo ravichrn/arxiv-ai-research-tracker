@@ -304,3 +304,19 @@ def _build_graph():
 
 _graph = _build_graph()
 rag_graph = _graph  # expose for supervisor
+
+
+def _build_simple_graph():
+    """Single-pass RAG: agent calls tools once, then responds — no document grading
+    or hallucination check. Used by cost_analysis to measure the token overhead of
+    the full Self-RAG verification loop."""
+    graph = StateGraph(AgentState)
+    graph.add_node("agent", agent_node)
+    graph.add_node("tools", _tool_node)
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")
+    return graph.compile()
+
+
+simple_rag_graph = _build_simple_graph()  # expose for cost_analysis

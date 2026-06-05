@@ -70,6 +70,8 @@ All validators follow a `PassResult` / `FailResult` contract (mirroring the Guar
 
 ## Evaluation
 
+### Quality metrics
+
 Scored with [DeepEval](https://github.com/confident-ai/deepeval). Answer model: `gpt-5.4`. Judge: `claude-haiku-4-5` (cross-provider — avoids same-model inflation). Raw scores: [`evaluation/eval_metrics_snapshot.json`](evaluation/eval_metrics_snapshot.json).
 
 Eval DB: ~185 indexed papers. RAG cases use 15 paper-specific queries targeting named papers (BERT-as-a-Judge, RecaLLM, VisionFoundry, VISOR, etc.) — each query has exactly one target paper, so the eval measures whether retrieval surfaces and ranks the right one. Adversarial cases cover 26 probes across two axes: completely non-CS domains (medicine, law, cosmology, climate science, music theory, archaeology) and within-CS subfields not in the corpus (cryptography, distributed systems, networking, OS, compilers, formal verification) — the latter are harder since the model has strong parametric knowledge there.
@@ -82,15 +84,34 @@ Eval DB: ~185 indexed papers. RAG cases use 15 paper-specific queries targeting 
 | Adversarial RAG | Answer relevancy | **0.560** ± 0.406 | 26 | higher than prior run because gpt-5.4 occasionally gives partially useful grounded answers; faithfulness (not relevancy) is the primary signal here |
 | No-context baseline | Answer relevancy | 0.995 ± 0.012 | 5 | gpt-5.4 from parametric knowledge; retrieval value strongest on niche/recent papers |
 
-**Retrieval fix (before → after).** The BM25/FTS index is built on the chunk text only, and originally only the abstract was embedded — so paper *titles* were unsearchable. A query like *"What does BERT-as-a-Judge propose"* couldn't match the paper by title and `ContextualRelevancyMetric` scored **0.11** (the right paper rarely ranked into the top-k). Prepending the title to each indexed chunk (so both the dense embedding and BM25 see it) lifted retrieval to **1.00 contextual precision** — the target paper now ranks first. Contextual *precision* (does the relevant node rank above irrelevant ones?) is the correct metric for single-target queries; contextual *relevancy* has a ~1/k ceiling when only one of k retrieved papers matches.
+### Agentic overhead analysis
 
-The 3 skipped RAG cases are judge-side failures (`claude-haiku` occasionally returns invalid JSON for the precision metric), not retrieval failures — they are skipped rather than scored as 0.
+Multi-agent systems are expensive. `evaluation/cost_analysis.py` measures what the Self-RAG verification loop actually costs against a single-pass baseline — LLM call count, token usage, and wall-clock latency per query.
+
+Three pipeline variants are compared on the same queries:
+
+| Pipeline | LLM calls | Tokens | Latency | Description |
+| --- | ---: | ---: | ---: | --- |
+| `full_selfrag` | 17.2 | 7,925 | 38s | full graph: grade_docs + hallucination_check + rewrite loop |
+| `simple_graph` | 2.0 | 2,448 | 8.5s | agent → tools → answer, no verification nodes |
+| `single_llm_call` | 1.0 | 1,858 | 4.9s | one `hybrid_search` + one direct LLM call |
+| **full vs single overhead** | **17.2x** | **4.3x** | **7.7x** | cost of the full agentic verification loop |
+
+The overhead ratio (`full_selfrag` vs `single_llm_call`) quantifies what the Self-RAG verification loop costs relative to the minimal possible approach. Results are saved to [`evaluation/cost_vs_quality.json`](evaluation/cost_vs_quality.json) and updated each run.
+
+### Running evals
 
 ```bash
+# Quality metrics (requires populated DB and LLM API keys)
 uv run python -m evaluation.run_eval --suite all --samples 5 --write-metrics evaluation/eval_metrics_snapshot.json
 uv run python -m evaluation.run_eval --suite rag
 uv run python -m evaluation.run_eval --suite adversarial
-uv run pytest evaluation/   # deterministic tests, no API key needed
+
+# Agentic overhead analysis — writes evaluation/cost_vs_quality.json
+uv run python -m evaluation.cost_analysis --samples 5
+
+# Deterministic tests — no API key or DB needed
+uv run pytest evaluation/
 ```
 
 Configure judge in `.env`: `EVAL_JUDGE=openai|claude|prometheus`, `EVAL_JUDGE_MODEL=<model-name>`.

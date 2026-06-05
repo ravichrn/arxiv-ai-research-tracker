@@ -1,0 +1,40 @@
+{
+  "full_selfrag": {
+    "variant": "full_selfrag",
+    "n": 5,
+    "llm_calls_mean": 17.2,
+    "prompt_tokens_mean": 7135,
+    "completion_tokens_mean": 789.8,
+    "total_tokens_mean": 7924.8,
+    "latency_ms_mean": 38094.66077479301
+  },
+  "simple_graph": {
+    "variant": "simple_pass",
+    "n": 5,
+    "llm_calls_mean": 2,
+    "prompt_tokens_mean": 2010,
+    "completion_tokens_mean": 438.2,
+    "total_tokens_mean": 2448.2,
+    "latency_ms_mean": 8466.879600210814
+  },
+  "single_llm_call": {
+    "variant": "single_llm_call",
+    "n": 5,
+    "llm_calls_mean": 1,
+    "prompt_tokens_mean": 1612.6,
+    "completion_tokens_mean": 245.8,
+    "total_tokens_mean": 1858.4,
+    "latency_ms_mean": 4938.785291602835
+  },
+  "overhead_full_vs_single": {
+    "llm_calls": 17.2,
+    "total_tokens": 4.26,
+    "latency_ms": 7.71
+  },
+  "overhead_simple_vs_single": {
+    "llm_calls": 2.0,
+    "total_tokens": 1.32,
+    "latency_ms": 1.71
+  },
+  "n_samples": 5
+}
