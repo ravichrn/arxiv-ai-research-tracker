@@ -676,11 +676,22 @@ def _embed_and_store(papers: list[dict]) -> int:
     docs: list[Document] = []
     for paper in papers:
         chunks = _splitter.split_text(paper["abstract"])
+        total = len(chunks)
+        # Trim abstract context to first 400 chars to avoid token bloat on later chunks.
+        abstract_ctx = paper.get("abstract", "")[:400]
         for i, chunk_text in enumerate(chunks):
             # Prepend the title so both the dense embedding and the BM25 index see it.
             # The FTS index is built on this text column only, so a title-bearing query
             # ("What does BERT-as-a-Judge propose") otherwise can't match the paper.
-            indexed_text = f"{paper['title']}\n\n{chunk_text}"
+            # For non-first chunks of multi-chunk papers, also prepend the abstract as
+            # contextual retrieval: chunks from long documents lose paper-level meaning
+            # without it, which is the exact failure mode that misses named-paper queries.
+            if total > 1 and i > 0:
+                indexed_text = (
+                    f"{paper['title']}\n\n[Abstract context: {abstract_ctx}]\n\n{chunk_text}"
+                )
+            else:
+                indexed_text = f"{paper['title']}\n\n{chunk_text}"
             docs.append(
                 Document(
                     page_content=indexed_text,
@@ -693,7 +704,7 @@ def _embed_and_store(papers: list[dict]) -> int:
                         "published": paper["published"],
                         "chunk_id": f"{paper['url']}#{i}",
                         "chunk_index": i,
-                        "total_chunks": len(chunks),
+                        "total_chunks": total,
                     },
                 )
             )

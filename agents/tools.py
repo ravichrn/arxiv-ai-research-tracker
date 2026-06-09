@@ -1,10 +1,14 @@
+import logging
 import re
 
 from langchain_core.tools import tool
 
+from databases.citation_graph import get_edges, has_edges
 from databases.interest_rerank import interest_aware_rerank
 from databases.stores import hybrid_search, invalidate_fts_index, papers_store, saved_store
 from guardrails.sanitizer import sanitize_retrieved
+
+_log = logging.getLogger(__name__)
 
 # arXiv URLs are strictly alphanumeric + a small set of punctuation — no quotes.
 # This whitelist guards against unexpected values reaching the LanceDB delete filter.
@@ -68,11 +72,78 @@ def _format_live_results(papers: list[dict], source_label: str = "arXiv (live)")
     )
 
 
+def _expand_with_citations(query: str, seed_docs: list) -> list:
+    """GraphRAG: expand seed results with 1-hop citation neighbors from the cache.
+
+    Only reads the local SQLite citation cache — no S2 API calls, no extra latency.
+    Papers whose lineage has been fetched (via the lineage node) automatically enrich
+    subsequent RAG searches with their citation neighbors.
+
+    Caps expansion to 2 novel papers to keep context manageable.
+    """
+    if not seed_docs:
+        return seed_docs
+
+    # Collect base arxiv_ids from top-2 seed papers only.
+    seed_ids: list[str] = []
+    for doc in seed_docs[:2]:
+        arxiv_id = doc.metadata.get("arxiv_id", "")
+        if arxiv_id:
+            seed_ids.append(arxiv_id.split("v")[0])
+
+    if not seed_ids:
+        return seed_docs
+
+    # Gather cited arxiv_ids from cached reference edges.
+    seed_url_set = {d.metadata.get("url", "") for d in seed_docs}
+    expansion_ids: list[str] = []
+    for seed_id in seed_ids:
+        if has_edges(seed_id):
+            for edge in get_edges(seed_id, "references", limit=5):
+                cid = edge.get("cited_arxiv_id", "")
+                if cid and cid not in seed_ids:
+                    expansion_ids.append(cid)
+
+    if not expansion_ids:
+        return seed_docs
+
+    # Look up each cited paper in the local index via its title.
+    from ingestion.arxiv_fetcher import get_paper_by_arxiv_id
+
+    novel_docs: list = []
+    seen_ids = set(seed_ids)
+    for arxiv_id in expansion_ids:
+        if arxiv_id in seen_ids:
+            continue
+        paper = get_paper_by_arxiv_id(arxiv_id)
+        if not paper:
+            continue
+        neighbor = hybrid_search(papers_store, paper["title"], k=1, rerank=False)
+        if neighbor:
+            neighbor_url = neighbor[0].metadata.get("url", "")
+            if neighbor_url and neighbor_url not in seed_url_set:
+                novel_docs.append(neighbor[0])
+                seed_url_set.add(neighbor_url)
+                seen_ids.add(arxiv_id)
+        if len(novel_docs) >= 2:
+            break
+
+    if novel_docs:
+        _log.info(
+            "[GraphRAG] expanded %d seed(s) with %d citation neighbor(s)",
+            len(seed_ids),
+            len(novel_docs),
+        )
+
+    return seed_docs + novel_docs
+
+
 @tool
 def search_papers(query: str) -> str:
     """Search AI papers — checks local index first, then falls back to live arXiv search."""
     docs = hybrid_search(papers_store, query, k=3)
     docs = interest_aware_rerank(query, docs)
+    docs = _expand_with_citations(query, docs)
     if docs:
         return _format_docs(docs)
 

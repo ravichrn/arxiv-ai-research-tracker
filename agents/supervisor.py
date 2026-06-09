@@ -95,8 +95,9 @@ _SYSTEM_MESSAGE = SystemMessage(
         "recent arXiv papers, search the paper database, get summaries, compare papers, "
         "auto-tag/cluster papers, generate digests, create Mermaid diagrams, and extract "
         "figures from papers.\n"
-        "Available capabilities: fetch (ingest new papers), rag (Q&A search), "
-        "summarize (batch summary), compare (side-by-side comparison), "
+        "Available capabilities: fetch (ingest new papers), "
+        "lookup (exact-match by paper title or author), "
+        "rag (Q&A search), summarize (batch summary), compare (side-by-side comparison), "
         "tag (cluster papers by research theme), digest (recent papers digest), "
         "diagram (Mermaid flowchart of a paper's methodology), "
         "figures (extract real images/figures from a paper), "
@@ -118,6 +119,10 @@ Given the user request, respond with a JSON object only (no markdown, no explana
 Rules:
 - Use "fetch" when the user wants to download/retrieve new papers from arXiv.
 - Use "list" when the user wants to see saved/fetched papers with their IDs and titles.
+- Use "lookup" when the user wants to find a specific named paper by title
+  (e.g. "find the BERT paper", "show me 'Attention is All You Need'") or by author name
+  (e.g. "papers by Vaswani"). Prefer "lookup" over "rag" when the query is a specific
+  paper title in quotes or contains "the X paper" patterns.
 - Use "rag" when the user wants to search or ask questions about papers.
 - Use "summarize" when the user wants a summary or overview of papers.
 - Use "compare" when the user wants to compare papers side by side.
@@ -287,6 +292,88 @@ def list_node(state: SupervisorState) -> dict:
     """List all saved papers with their arXiv IDs and titles."""
     _log.info("[Supervisor] Listing saved papers.")
     result = list_papers()
+    return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+
+def lookup_node(state: SupervisorState) -> dict:
+    """Exact-match paper lookup by title or author — no embedding call.
+
+    Routes "find the BERT paper" / "papers by Vaswani" queries to the JSONL
+    index instead of semantic search, which is the wrong tool for named lookups.
+
+    Priority:
+    1. #arxiv_id already resolved to pinned_paper → return that paper.
+    2. Quoted title in rag_query → exact case-insensitive title match.
+    3. Author name keyword → scan JSONL for author matches.
+    4. Unquoted title substring → fuzzy title scan (no embedding).
+    """
+    pinned = _get_pinned_paper(state)
+    query = state.get("rag_query") or _last_human_content(state)
+
+    # Priority 1: already resolved via #arxiv_id
+    if pinned:
+        paper = get_paper_by_title(pinned)
+        if paper:
+            return _lookup_format_result([paper], query)
+
+    # Priority 2: quoted title in query
+    quoted = _re.findall(r'"([^"]{3,})"', query)
+    if quoted:
+        for candidate in quoted:
+            paper = get_paper_by_title(candidate)
+            if paper:
+                return _lookup_format_result([paper], query)
+
+    # Priority 3: author search — "by <Name>" or "papers by <Name>"
+    by_match = _re.search(r"\bby\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)", query)
+    if by_match:
+        author_kw = by_match.group(1).lower()
+        from ingestion.arxiv_fetcher import _load_papers_cache
+
+        matches = [p for p in _load_papers_cache() if author_kw in p.get("authors", "").lower()]
+        if matches:
+            return _lookup_format_result(matches[:5], query)
+
+    # Priority 4: unquoted substring scan against stored titles
+    q_lower = query.lower()
+    # Strip common lookup phrases so we're left with the paper name fragment.
+    for phrase in ("find the", "show me", "look up", "get", "find", "show", "the paper", " paper"):
+        q_lower = q_lower.replace(phrase, " ")
+    q_lower = q_lower.strip()
+
+    if len(q_lower) >= 4:
+        from ingestion.arxiv_fetcher import _load_papers_cache
+
+        matches = [p for p in _load_papers_cache() if q_lower in p.get("title", "").lower()]
+        if matches:
+            return _lookup_format_result(matches[:5], query)
+
+    result = (
+        f"No exact match found for: {query!r}.\n"
+        "Try quoting the title (e.g. 'find \"BERT\"'), referencing by arXiv ID "
+        "(e.g. #2301.12345), or use 'rag' to search semantically."
+    )
+    return {"last_result": result, "messages": [AIMessage(content=result)]}
+
+
+def _lookup_format_result(papers: list[dict], query: str) -> dict:
+    """Format lookup results as a structured paper list."""
+    lines: list[str] = [f"Found {len(papers)} paper(s) matching your query:\n"]
+    for p in papers:
+        arxiv_id = p.get("arxiv_id", "")
+        lines.append(f"**{sanitize_retrieved(p['title'])}**")
+        lines.append(f"  ArXiv ID : #{arxiv_id}")
+        lines.append(f"  Authors  : {sanitize_retrieved(p.get('authors', 'N/A'))}")
+        lines.append(f"  Published: {p.get('published', 'N/A')[:10]}")
+        lines.append(f"  URL      : {sanitize_retrieved(p.get('url', ''))}")
+        abstract = sanitize_retrieved(p.get("abstract", ""))
+        lines.append(f"  Abstract : {abstract[:300]}{'…' if len(abstract) > 300 else ''}")
+        if p.get("s2_tldr"):
+            lines.append(f"  TL;DR    : {sanitize_retrieved(p['s2_tldr'])}")
+        lines.append("")
+    first_id = papers[0].get("arxiv_id", "")
+    lines.append(f"Reference any paper with its arXiv ID, e.g. 'summarize #{first_id}v1'")
+    result = "\n".join(lines)
     return {"last_result": result, "messages": [AIMessage(content=result)]}
 
 
@@ -536,6 +623,7 @@ def clarify_node(state: SupervisorState) -> dict:
     clarification = (
         "I'm not sure what you'd like to do. You can ask me to:\n"
         "- **Fetch** new papers (e.g. 'fetch recent NLP papers')\n"
+        "- **Lookup** a specific paper by name (e.g. 'find the BERT paper', 'papers by Vaswani')\n"
         "- **Search** for papers (e.g. 'find papers on diffusion models')\n"
         "- **Summarize** papers (e.g. 'summarize recent robotics papers')\n"
         "- **Compare** papers (e.g. 'compare #2301.12345 and #2504.08123')\n"
@@ -1060,6 +1148,8 @@ def _dispatch_intent(state: SupervisorState) -> str:
         return "ingestion"
     if intent == "list":
         return "list"
+    if intent == "lookup":
+        return "lookup"
     if intent == "export":
         return "export"
     if intent == "explain":
@@ -1138,6 +1228,7 @@ def _build_supervisor_graph(checkpointer=None):
     graph.add_node("route", route_node)
     graph.add_node("ingestion", ingestion_node)
     graph.add_node("list", list_node)
+    graph.add_node("lookup", lookup_node)
     graph.add_node("export", export_node)
     graph.add_node("rag", rag_node)
     graph.add_node("explain", explain_node)
@@ -1160,6 +1251,7 @@ def _build_supervisor_graph(checkpointer=None):
     _CAPS = (
         "ingestion",
         "list",
+        "lookup",
         "export",
         "rag",
         "explain",

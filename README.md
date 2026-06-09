@@ -4,13 +4,13 @@ A multi-agent research assistant built in LangGraph that operates over a corpus 
 
 | Layer | Technology |
 |---|---|
-| Vector store & retrieval | LanceDB · OpenAI embeddings · dense + BM25 hybrid retrieval (RRF merge) · cross-encoder reranking |
+| Vector store & retrieval | LanceDB · OpenAI embeddings · dense + BM25 hybrid retrieval (RRF merge) · cross-encoder reranking · citation-graph expansion |
 | Agent framework | LangGraph (supervisor + Self-RAG) · LangChain tools |
 | API | FastAPI · Pydantic · SSE streaming |
 | LLM support | OpenAI · Anthropic Claude · Ollama (local) · vLLM (GPU serving) |
 | Observability | Prometheus `/metrics` · Grafana dashboard · structured JSON logs |
 | Evaluation | DeepEval · LangSmith tracing |
-| Storage | SQLite (cache, memory, metadata) · NDJSON · diskcache |
+| Storage | SQLite (cache, memory, metadata, citation graph) · NDJSON · diskcache |
 
 ---
 
@@ -22,12 +22,14 @@ A multi-agent research assistant built in LangGraph that operates over a corpus 
 | --- | --- | --- |
 | **Ingest** | *"Fetch recent NLP papers"* | Pulls new papers from arXiv, embeds, and indexes them. Incremental — only fetches what's new. |
 | **Library** | *"List saved papers"* | Shows your saved collection with arXiv IDs, citation counts, and one-sentence TLDRs. |
-| **Search & Q&A** | *"Find papers on diffusion models"* | Local vector search first (oversampled, reranked); falls back to live arXiv if nothing is indexed — results are saved and indexed automatically. |
+| **Lookup** | *"Find the BERT paper"*, *"Papers by Vaswani"* | Exact-match search by paper title or author — no embedding call. Bypasses semantic search for named-paper queries where similarity is the wrong tool. Supports quoted titles, author names, and arXiv ID pins. |
+| **Search & Q&A** | *"Find papers on diffusion models"* | Local hybrid search first (oversampled, reranked, GraphRAG-expanded); falls back to live arXiv if nothing is indexed — results are saved and indexed automatically. |
 | **Summarize** | *"Summarize recent robotics work"*, *"Summarize #2504.08123v2"* | Batch or single-paper summarization. |
 | **Compare** | *"Compare #2301.12345 and #2504.08123"* | Side-by-side comparison: motivation, approach, limitations, and a verdict. |
 | **Themes** | *"Tag papers"* | Groups your collection into named research themes. |
 | **Reading aids** | *"Diagram #…"*, *"Get figures from #…"* | Mermaid methodology diagram from the abstract, or real figures extracted from the paper. |
 | **Digest** | *"Daily digest"*, *"Digest last 14 days"* | Newsletter-style summary grouped by research area. |
+| **Citation lineage** | *"Show lineage for #2301.12345"* | 1-hop citation graph from Semantic Scholar: papers this work references and papers that cite it. Cached in SQLite; subsequent calls are instant. |
 | **Export** | *"Export saved --bibtex"*, *"Trends last 14 days"* | Deterministic BibTeX/CSV export or category trend analysis. |
 | **Tags & notes** | *"Save tag #… diffusion"* | Attach personal tags and notes to papers — influences future retrieval ranking. |
 | **Chaining** | *"Fetch new ML papers then find the best ones on LLMs"* | Multiple steps run in sequence within a single turn. |
@@ -39,6 +41,12 @@ Multi-step verification loop: retrieves chunks via `hybrid_search()` → grades 
 ### Retrieval and reranking
 
 Dense vector search (OpenAI embeddings) and BM25 run in parallel, merged with **Reciprocal Rank Fusion** (RRF), then reranked with a **cross-encoder** for a final precision pass. LangChain's built-in hybrid path is bypassed — it's incompatible with LanceDB ≥0.30. Saved tags influence ranking when they overlap the query.
+
+**GraphRAG citation expansion:** after the initial hybrid search returns seed papers, the retrieval pipeline checks the local citation cache for 1-hop references of the top results. Cached neighbor papers are fetched from the local index and appended to the context window before grading. No S2 API calls at query time — only edges already cached via the `lineage` command are used, so expansion adds zero latency until a paper's lineage has been fetched.
+
+**Exact-match routing:** the supervisor distinguishes "find the VISOR paper" (lookup intent) from "find papers about video segmentation" (semantic search intent) and routes named-paper queries to a structured title/author index rather than through embeddings — the correct tool for that job.
+
+**Contextual retrieval:** for multi-chunk papers, non-first chunks are indexed with the paper's abstract prepended as document-level context, so chunks from long papers don't lose their paper-level meaning in embedding space.
 
 ### Model serving and caching
 
